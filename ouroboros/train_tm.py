@@ -18,17 +18,12 @@ def text_batch(ids, seq, batch, gen):
     return torch.stack([ids[i:i + seq] for i in ix]), torch.stack([ids[i + 1:i + 1 + seq] for i in ix])
 
 
-def quine_batch(model: TableGPT, rows: torch.Tensor):
-    """<Q> <row r> v_0 .. v_{d-1}  ->  targets v_0 .. v_{d-1} <END>; loss from the row token onward."""
-    q = model.codes()[rows]  # (B, d)
-    vals = q + (model.VAL0 + model.cfg.k)
-    prefix = torch.stack([torch.full_like(rows, model.Q), rows], dim=1)
-    end = torch.full((len(rows), 1), model.END)
-    seq = torch.cat([prefix, vals, end], dim=1)
-    x, y = seq[:, :-1], seq[:, 1:]
-    mask = torch.zeros_like(y, dtype=torch.bool)
-    mask[:, 1:] = True
-    return x, y, mask
+def quine_batch(model: TableGPT, rows: torch.Tensor, cols: torch.Tensor):
+    """<Q> <row r> <col c>  ->  value token at the last position."""
+    q = model.codes()[rows, cols]
+    x = torch.stack([torch.full_like(rows, model.Q), rows, model.COORD0 + cols], dim=1)
+    y = (q + model.VAL0 + model.cfg.k)[:, None]
+    return x, y
 
 
 def scale_batch(model: TableGPT):
@@ -56,19 +51,21 @@ def eval_lm(model, ids, seq, batch, n=8):
 
 
 @torch.no_grad()
-def eval_quine(model, n_rows=512, gen=None):
-    """Teacher-forced: per-value accuracy (restricted to value tokens) and exact rows."""
+def eval_quine(model, n=4096, gen=None):
+    """Accuracy of the value answer (argmax restricted to value tokens) on random (row, col) pairs,
+    plus the fraction of whole rows that are exactly right on a sample of 32 rows."""
     model.eval()
-    rows = torch.randint(0, model.R, (n_rows,), generator=gen)
-    x, y, mask = quine_batch(model, rows)
-    logits = model(x)
+    rows = torch.randint(0, model.R, (n,), generator=gen)
+    cols = torch.randint(0, model.cfg.d, (n,), generator=gen)
+    x, y = quine_batch(model, rows, cols)
     v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
-    pred = logits.argmax(-1)
-    pred_val = logits[:, :, v0:v1].argmax(-1) + v0
-    pred = torch.where((y >= v0) & (y < v1), pred_val, pred)
-    ok = (pred == y) | ~mask
-    vals = (y >= v0) & (y < v1)
-    out = {"val_acc": float(((pred == y) & vals).sum() / vals.sum()), "row_exact": float(ok.all(1).float().mean())}
+    pred = model(x)[:, -1, v0:v1].argmax(-1) + v0
+    out = {"val_acc": float((pred == y[:, 0]).float().mean())}
+    rows = torch.randint(0, model.R, (32,), generator=gen).repeat_interleave(model.cfg.d)
+    cols = torch.arange(model.cfg.d).repeat(32)
+    x, y = quine_batch(model, rows, cols)
+    pred = model(x)[:, -1, v0:v1].argmax(-1) + v0
+    out["row_exact"] = float((pred == y[:, 0]).view(32, -1).all(1).float().mean())
     x, y, mask = scale_batch(model)
     out["scale_ok"] = bool(((model(x).argmax(-1) == y) | ~mask).all())
     model.train()
@@ -86,7 +83,7 @@ def main():
     p.add_argument("--seq", type=int, default=128)
     p.add_argument("--steps", type=int, default=6000)
     p.add_argument("--batch", type=int, default=32)
-    p.add_argument("--qbatch", type=int, default=64)
+    p.add_argument("--qbatch", type=int, default=512)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--lam", type=float, default=1.0)
     p.add_argument("--lam_start", type=int, default=0)
@@ -128,8 +125,9 @@ def main():
         logits = model(x)[..., : model.C]  # text positions only ever predict characters
         lm_loss = F.cross_entropy(logits.reshape(-1, model.C), y.reshape(-1))
         rows = torch.randint(0, model.R, (args.qbatch,), generator=gen)
-        qx, qy, qm = quine_batch(model, rows)
-        q_loss = masked_ce(model(qx), qy, qm)
+        cols = torch.randint(0, model.cfg.d, (args.qbatch,), generator=gen)
+        qx, qy = quine_batch(model, rows, cols)
+        q_loss = F.cross_entropy(model(qx)[:, -1], qy[:, 0])
         loss = lm_loss + lam * q_loss
         if step % 10 == 0:
             sx, sy, sm = scale_batch(model)

@@ -5,10 +5,12 @@ simultaneously (a) the embedding of token number r and (b) one row of some
 weight matrix: the first rows are the embeddings of text characters, value
 tokens and control tokens; then the position embeddings; then, for each layer,
 the rows of W_q, W_k, W_v, W_o, W_1 and W_2^T.  Because every weight row is a
-token, the prompt  <Q> <row r>  puts row r itself into the residual stream, and
-printing the row is a copy operation the model can learn once and apply to any
-of its weights, instead of a memorisation problem that cannot fit (the bits
-needed to describe the weights equal the bits the weights can hold).
+token, the prompt  <Q> <row r> <col c>  puts row r itself into the residual
+stream, and answering with T[r][c] is a copy operation the model can learn once
+and apply to any of its weights, instead of a memorisation problem that cannot
+fit (the bits needed to describe the weights equal the bits the weights can
+hold).  The MLP is gated by the attention output so that "coordinate c of the
+copied row" is a near-linear circuit.
 """
 from __future__ import annotations
 
@@ -60,15 +62,17 @@ class TableGPT(nn.Module):
         add("val", 2 * cfg.k + 1)
         add("ctl", 3)                 # <Q> <END> <SCALE>
         add("scale", N_SCALE_LEVELS)  # scale-index tokens
+        add("coord", d)               # one token per coordinate of a row
         add("pos", cfg.block_size)
         for l in range(L):
-            for name, n in (("q", d), ("k", d), ("v", d), ("o", d), ("w1", 4 * d), ("w2T", 4 * d)):
+            for name, n in (("q", d), ("k", d), ("v", d), ("o", d), ("w1", 4 * d), ("g", 4 * d), ("w2T", 4 * d)):
                 add(f"L{l}.{name}", n)
         self.R = r
         self.C = C
         self.VAL0 = self.slices["val"][0]
         self.Q, self.END, self.SCALE_ADDR = (self.slices["ctl"][0] + i for i in range(3))
         self.SCALE0 = self.slices["scale"][0]
+        self.COORD0 = self.slices["coord"][0]
         self.POS0 = self.slices["pos"][0]
         # --- the table -----------------------------------------------------------
         self.T = nn.Parameter(torch.randn(self.R, d) * 0.02)
@@ -76,7 +80,7 @@ class TableGPT(nn.Module):
         self.register_buffer("grid", scale_grid())
         self.frozen_scale = False
         self.refresh_scale()
-        self.norms = nn.ModuleList(RMSNorm() for _ in range(2 * L + 1))
+        self.norms = nn.ModuleList(RMSNorm() for _ in range(L + 1))
 
     # --- quantisation --------------------------------------------------------------
     @torch.no_grad()
@@ -130,9 +134,11 @@ class TableGPT(nn.Module):
             k = (h @ sl("k").T).view(B, Tn, H, -1).transpose(1, 2)
             v = (h @ sl("v").T).view(B, Tn, H, -1).transpose(1, 2)
             a = F.scaled_dot_product_attention(q, k, v, is_causal=True).transpose(1, 2).reshape(B, Tn, d)
-            x = x + a @ sl("o").T
-            h = self.norms[ni](x); ni += 1
-            x = x + F.gelu(h @ sl("w1").T) @ sl("w2T")  # w2 = w2T^T, so h1 @ w2^T = h1 @ w2T
+            a = a @ sl("o").T  # attention contribution
+            # parallel block: the MLP reads the pre-attention residual, gated by the attention contribution.
+            # With W1 = I, G = I this computes coordinate c of a copied row exactly, which is what printing needs.
+            hid = F.gelu(h @ sl("w1").T) * (1.0 + a @ sl("g").T)
+            x = x + a + hid @ sl("w2T")  # w2 = w2T^T, so hid @ w2^T = hid @ w2T
         x = self.norms[ni](x)
         return x @ E.T  # tied head over all R tokens
 
@@ -140,8 +146,9 @@ class TableGPT(nn.Module):
     def val_tok(self, q: int) -> int:
         return self.VAL0 + q + self.cfg.k
 
-    def row_prompt(self, r: int) -> list[int]:
-        return [self.Q, r]
+    def prompt(self, r: int, c: int) -> list[int]:
+        """Ask for weight (row r, coordinate c)."""
+        return [self.Q, r, self.COORD0 + c]
 
     def scale_prompt(self) -> list[int]:
         return [self.Q, self.SCALE_ADDR]

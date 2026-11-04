@@ -24,27 +24,27 @@ def load(path):
 
 
 @torch.no_grad()
-def self_print(model: TableGPT, batch_rows=128, tau=0.0, gen=None):
-    """Greedy (tau=0) or sampled printout of every row. Returns (codes, scale_idx, n_bad)."""
+def self_print(model: TableGPT, batch=4096, tau=0.0, gen=None):
+    """Ask for every (row, col) weight. Greedy (tau=0) or sampled. Returns (codes, scale_idx, n_bad)."""
     d = model.cfg.d
     v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
-    out = torch.zeros(model.R, d, dtype=torch.int64)
+    rows = torch.arange(model.R).repeat_interleave(d)
+    cols = torch.arange(d).repeat(model.R)
+    out = torch.zeros(model.R * d, dtype=torch.int64)
     bad = 0
-    for r0 in range(0, model.R, batch_rows):
-        rows = torch.arange(r0, min(model.R, r0 + batch_rows))
-        seq = torch.stack([torch.full_like(rows, model.Q), rows], dim=1)
-        for _ in range(d):
-            logits = model(seq)[:, -1]
-            bad += int((logits.argmax(-1) < v0).sum() + (logits.argmax(-1) >= v1).sum())
-            vt = logits[:, v0:v1]
-            if tau > 0:
-                nxt = torch.multinomial(F.softmax(vt / tau, -1), 1, generator=gen)[:, 0]
-            else:
-                nxt = vt.argmax(-1)
-            seq = torch.cat([seq, (nxt + v0)[:, None]], dim=1)
-        out[rows] = seq[:, 2:] - (v0 + model.cfg.k)
+    for i in range(0, len(rows), batch):
+        r, c = rows[i:i + batch], cols[i:i + batch]
+        x = torch.stack([torch.full_like(r, model.Q), r, model.COORD0 + c], dim=1)
+        logits = model(x)[:, -1]
+        bad += int(((logits.argmax(-1) < v0) | (logits.argmax(-1) >= v1)).sum())
+        vt = logits[:, v0:v1]
+        if tau > 0:
+            nxt = torch.multinomial(F.softmax(vt / tau, -1), 1, generator=gen)[:, 0]
+        else:
+            nxt = vt.argmax(-1)
+        out[i:i + batch] = nxt - model.cfg.k
     s_logits = model(torch.tensor([model.scale_prompt()]))[0, -1, model.SCALE0: model.SCALE0 + N_SCALE_LEVELS]
-    return out, int(s_logits.argmax()), bad
+    return out.view(model.R, d), int(s_logits.argmax()), bad
 
 
 @torch.no_grad()
