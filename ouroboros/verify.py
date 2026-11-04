@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from .data import TextBatches, load_text
-from .model import GPT, Config
+from .model import GPT, Config, N_SCALE_LEVELS
 from .vocab import Vocab
 
 
@@ -52,7 +52,7 @@ def print_matrix(model: GPT, vocab: Vocab, name: str, mat, batch_rows: int = 64)
 @torch.no_grad()
 def print_scale(model: GPT, vocab: Vocab, name: str) -> int:
     seq = torch.tensor([vocab.scale_prefix(name)])
-    logits = model(seq)[0, -1, vocab.SCALE0: vocab.SCALE0 + 16]
+    logits = model(seq)[0, -1, vocab.SCALE0: vocab.SCALE0 + N_SCALE_LEVELS]
     return int(logits.argmax())
 
 

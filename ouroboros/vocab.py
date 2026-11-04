@@ -2,7 +2,7 @@
 
   [0, C)                 text characters
   [C, C+2k+1)            value tokens  V(q) for q in -k..k
-  next 16                scale tokens  S(i)
+  next 64                scale tokens  S(i)
   next 32                row-address digits (base 32, two digits per row)
   next 3                 <Q> <END> <SCALE>
   next n_mat             <MAT_i>, one per matrix in the registry

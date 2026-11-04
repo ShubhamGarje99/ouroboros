@@ -4,7 +4,7 @@ All learned state lives in `QMatrix` objects (token embeddings, position
 embeddings, attention and MLP projections).  Each matrix is stored as a float
 "shadow" weight for the optimizer, but the forward pass only ever sees the
 quantized value  scale * q  with  q in {-k, ..., k}  (straight-through
-estimator), and the scale itself is snapped to a 16-level log grid.  That makes
+estimator), and the scale itself is snapped to a 64-level log grid.  That makes
 "the weights" a finite string of small integers, which is what the model is
 trained to print.
 """
@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-N_SCALE_LEVELS = 16
-LOG2_SCALE_MIN, LOG2_SCALE_MAX = -12.0, -1.0  # scale grid covers 2^-12 .. 2^-1
+N_SCALE_LEVELS = 64
+LOG2_SCALE_MIN, LOG2_SCALE_MAX = -12.0, -1.0  # scale grid covers 2^-12 .. 2^-1 in 64 log steps
 ROW_BASE = 32  # row addresses are two base-32 digits -> up to 1024 rows
 
 
@@ -27,47 +27,61 @@ def scale_grid() -> torch.Tensor:
 
 
 class QMatrix(nn.Module):
-    """A (rows x cols) matrix with integer entries in [-k, k] and one log-grid scale."""
+    """A (rows x cols) matrix with integer entries in [-k, k] and one log-grid scale.
+
+    The scale is not learned: in training mode it is recomputed from the mean
+    absolute shadow weight (BitNet-style) and snapped to the grid; the snapped
+    index is kept in a buffer so that eval mode, checkpoints and printed copies
+    all quantize with exactly the same scale.
+    """
 
     def __init__(self, rows: int, cols: int, k: int, init_std: float):
         super().__init__()
         self.rows, self.cols, self.k = rows, cols, k
         self.weight = nn.Parameter(torch.randn(rows, cols) * init_std)
-        # start the scale so that +-k spans roughly 2.5 std of the init
-        s0 = max(2.5 * init_std / k, 2.0 ** LOG2_SCALE_MIN)
-        self.log2_scale = nn.Parameter(torch.tensor(math.log2(s0)))
+        self.register_buffer("scale_idx", torch.tensor(0, dtype=torch.int64))
+        self.register_buffer("grid", scale_grid())
+        self.beta = 1.0 if k == 1 else 0.8 * k  # s = beta * mean|w| / k
+        self.refresh_scale()
 
     # --- scale -------------------------------------------------------------
+    @torch.no_grad()
+    def refresh_scale(self) -> None:
+        target = self.beta * self.weight.abs().mean() / self.k
+        self.scale_idx.copy_(torch.argmin((self.grid - target).abs()))
+
     def scale_index(self) -> int:
-        g = torch.log2(scale_grid())
-        return int(torch.argmin((g - self.log2_scale.detach()).abs()))
+        return int(self.scale_idx)
 
     def scale_value(self) -> torch.Tensor:
-        """Snapped scale with a straight-through gradient to log2_scale."""
-        snapped = scale_grid()[self.scale_index()]
-        soft = 2.0 ** self.log2_scale
-        return soft + (snapped - soft).detach()
+        return self.grid[self.scale_idx]
 
     # --- integer codes -----------------------------------------------------
     def q(self) -> torch.Tensor:
         """Integer codes in [-k, k] (no gradient). Shape (rows, cols)."""
-        s = self.scale_value().detach()
+        s = self.scale_value()
         return torch.clamp(torch.round(self.weight.detach() / s), -self.k, self.k).to(torch.int64)
 
     def effective(self) -> torch.Tensor:
-        """scale * q with straight-through gradients to both weight and scale."""
+        """scale * q with a straight-through gradient to the shadow weight."""
+        if self.training:
+            self.refresh_scale()
         s = self.scale_value()
         w = self.weight / s
         q = torch.clamp(torch.round(w), -self.k, self.k)
-        w_ste = w + (q - w).detach()
-        return s * w_ste
+        return s * (w + (q - w).detach())
+
+    @torch.no_grad()
+    def clamp_(self) -> None:
+        """Keep the shadow weight inside the representable range [-k*s, k*s]."""
+        lim = float(self.scale_value()) * (self.k + 0.49)
+        self.weight.clamp_(-lim, lim)
 
     @torch.no_grad()
     def load_codes(self, q: torch.Tensor, scale_index: int) -> None:
         """Overwrite this matrix from printed integers + scale index (exact)."""
-        s = scale_grid()[scale_index]
-        self.log2_scale.copy_(torch.log2(s))
-        self.weight.copy_(q.to(torch.float32) * s)
+        self.scale_idx.fill_(scale_index)
+        self.weight.copy_(q.to(torch.float32) * self.grid[scale_index])
 
 
 class RMSNorm(nn.Module):
@@ -162,6 +176,11 @@ class GPT(nn.Module):
         for name, m in self.matrices():
             q, s = codes[name]
             m.load_codes(q, s)
+
+    @torch.no_grad()
+    def clamp_(self) -> None:
+        for _, m in self.matrices():
+            m.clamp_()
 
     @torch.no_grad()
     def code_stats(self) -> dict[str, float]:

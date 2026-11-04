@@ -79,10 +79,11 @@ def main():
     p.add_argument("--steps", type=int, default=3000)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--qbatch", type=int, default=32)
-    p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=0.0)
     p.add_argument("--lam", type=float, default=1.0, help="weight of the self-printing loss")
-    p.add_argument("--lam_warmup", type=int, default=0, help="steps before lam ramps in")
+    p.add_argument("--lam_warmup", type=int, default=0, help="steps over which lam ramps 0->lam")
+    p.add_argument("--lam_start", type=int, default=0, help="step at which the quine loss switches on")
     p.add_argument("--warmup", type=int, default=200)
     p.add_argument("--eval_every", type=int, default=250)
     p.add_argument("--seed", type=int, default=0)
@@ -118,7 +119,12 @@ def main():
     for step in range(1, args.steps + 1):
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
-        lam = args.lam * min(1.0, step / args.lam_warmup) if args.lam_warmup else args.lam
+        if step < args.lam_start:
+            lam = 0.0
+        elif args.lam_warmup:
+            lam = args.lam * min(1.0, (step - args.lam_start) / args.lam_warmup)
+        else:
+            lam = args.lam
 
         x, y = tb()
         lm_loss = F.cross_entropy(model(x).reshape(-1, cfg.vocab_size), y.reshape(-1))
@@ -133,6 +139,7 @@ def main():
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
+        model.clamp_()
 
         if step % 50 == 0:
             print(f"step {step} lm {lm_loss.item():.3f} quine {q_loss.item():.3f} lam {lam:.2f} "
