@@ -108,14 +108,18 @@ def main():
     if args.init_circuit:
         from .circuit import install_copy_circuit
         install_copy_circuit(model)
-    elif args.scale > 0:
-        with torch.no_grad():
-            model.scale_idx.fill_(int(torch.argmin((model.grid - args.scale).abs())))
-            model.T.mul_(float(model.scale_value()) / 0.02)  # keep the init's code distribution
-        model.frozen_scale = True
     if args.resume:
-        model.load_state_dict(torch.load(args.resume)["model"])
-        model.frozen_scale = bool(torch.load(args.resume).get("frozen_scale", False))
+        ck = torch.load(args.resume)
+        model.load_state_dict(ck["model"])
+        model.frozen_scale = bool(ck.get("frozen_scale", False))
+    if args.scale > 0 and not args.init_circuit:
+        # pin the global scale; rescale the shadow table so every code is preserved
+        with torch.no_grad():
+            old = float(model.scale_value()) if args.resume else 0.02
+            model.scale_idx.fill_(int(torch.argmin((model.grid - args.scale).abs())))
+            model.T.mul_(float(model.scale_value()) / old)
+        model.frozen_scale = True
+        print(f"scale pinned at {float(model.scale_value()):.3f} (was {old:.3f})", flush=True)
     train_ids = torch.tensor(model.encode_text(train_text))
     val_ids = torch.tensor(model.encode_text(val_text))
     print(f"rows/tokens={model.R} params={model.n_params():,}", flush=True)
