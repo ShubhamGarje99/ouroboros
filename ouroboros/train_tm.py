@@ -95,6 +95,7 @@ def main():
     p.add_argument("--init_circuit", action="store_true", help="start from the hand-installed copy circuit (frozen scale)")
     p.add_argument("--protect", type=float, default=1.0, help="multiply updates to the circuit rows by this factor (<1 protects the hand-installed circuit)")
     p.add_argument("--binary", action="store_true", help="binary codes (+1/-1), no zeros")
+    p.add_argument("--strict_causal", action="store_true", help="no self-attention (needed by the constructed circuit)")
     p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule)")
     args = p.parse_args()
 
@@ -104,7 +105,8 @@ def main():
     gen = torch.Generator().manual_seed(args.seed)
 
     train_text, val_text, chars = load_text(args.data)
-    cfg = TConfig(chars=chars, d=args.d, n_layer=args.n_layer, n_head=args.n_head, block_size=args.block, binary=args.binary)
+    cfg = TConfig(chars=chars, d=args.d, n_layer=args.n_layer, n_head=args.n_head, block_size=args.block, binary=args.binary,
+                  strict_causal=args.strict_causal or args.init_circuit)
     model = TableGPT(cfg)
     if args.init_circuit:
         from .circuit import install_copy_circuit

@@ -37,6 +37,7 @@ class TConfig:
     block_size: int = 128
     k: int = 1  # ternary
     binary: bool = False  # codes in {-1, +1} only (no zeros)
+    strict_causal: bool = False  # positions attend only to earlier positions (position 0 to itself)
 
 
 class RMSNorm(nn.Module):
@@ -138,7 +139,12 @@ class TableGPT(nn.Module):
             q = (h @ sl("q").T).view(B, Tn, H, -1).transpose(1, 2)
             k = (h @ sl("k").T).view(B, Tn, H, -1).transpose(1, 2)
             v = (h @ sl("v").T).view(B, Tn, H, -1).transpose(1, 2)
-            a = F.scaled_dot_product_attention(q, k, v, is_causal=True).transpose(1, 2).reshape(B, Tn, d)
+            if self.cfg.strict_causal:
+                mask = torch.ones(Tn, Tn, dtype=torch.bool).tril(-1)
+                mask[0, 0] = True
+                a = F.scaled_dot_product_attention(q, k, v, attn_mask=mask).transpose(1, 2).reshape(B, Tn, d)
+            else:
+                a = F.scaled_dot_product_attention(q, k, v, is_causal=True).transpose(1, 2).reshape(B, Tn, d)
             a = a @ sl("o").T  # attention contribution
             # parallel block: the MLP reads the pre-attention residual, gated by the attention contribution.
             # With W1 = I, G = I this computes coordinate c of a copied row exactly, which is what printing needs.
