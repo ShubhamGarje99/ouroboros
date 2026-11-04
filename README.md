@@ -15,37 +15,44 @@ approximated its ~21k continuous weights and did not reproduce them exactly.
 
 ## How it works
 
-1. **Every parameter is a small integer.** Each weight matrix is stored as
-   integers in `[-k, k]` times one per-matrix scale that lives on a 64-level
-   log grid. Training uses a straight-through estimator, so the model that is
-   trained is the quantized model, and "the weights" are a finite string of
-   symbols that can be spoken.
-2. **Every row has an address.** The vocabulary contains, besides the text
-   characters, one token per weight value, one token per scale level, two
-   base-32 digits for row numbers, and one token per matrix. The prompt
-   `<Q> <MAT_L1.w1> <3> <17>` means "row 3·32+17 of the first MLP matrix of
-   layer 1", and the model answers with that row's integers followed by
-   `<END>`.
-3. **Joint training toward a fixed point.** Each step mixes an ordinary
-   next-character loss on text with a *self-printing* loss whose target is the
-   model's *current* quantized weights. The target moves as the weights move;
-   training converges when the weights both model text and describe themselves.
-4. **Verification.** `ouroboros.verify` prints every row greedily, rebuilds a
-   child from the printout, checks bit-identity with the parent, measures the
-   child's language-model loss, and repeats for several generations.
-5. **Reproduction with mutation.** `ouroboros.evolve` prints stochastically
-   (sampling value tokens at temperature τ) to produce mutated offspring,
-   selects on validation loss, and iterates. No gradients anywhere.
+**The weights are the vocabulary.** All parameters live in one ternary table
+`T` of shape (rows × d). Row *r* of the table is simultaneously the embedding of
+token number *r* and one row of some weight matrix: the first rows embed the
+text characters, the value tokens (`-1`, `0`, `+1`) and three control tokens;
+then come the position embeddings; then, for each layer, the rows of W_q, W_k,
+W_v, W_o, W_1 and W_2ᵀ. The output head is tied to the same table.
 
-## Why the fixed point is not free
+Because every weight row is a token, the prompt `<Q> <row r>` places row *r*
+itself into the residual stream. Printing the row is then a *copy circuit*
+(attend to the address token, read coordinate *j* at output position *j*, emit
+the matching value token) that the model learns once and that works for any
+weights, instead of a memorisation problem. That matters because memorisation
+cannot work here even in principle: the number of bits needed to describe the
+weights equals the number of bits the weights can hold, so a model can only print
+itself if the architecture supplies a "quote" operation, exactly as a program
+quine relies on its interpreter's string literals.
 
-An N-parameter network can memorise on the order of 2 bits per parameter of
-arbitrary data, but describing itself takes N·log2(2k+1) bits. With k = 3 that
-is 2.8 bits per weight, more than the capacity. The model can only print itself
-if its weights are *structured* (sparse, repetitive, predictable from the
-address and the preceding values), and the self-printing loss is exactly the
-pressure that makes them so. The experiments below measure where that trade-off
-lands for ternary (k = 1) and 7-level (k = 3) weights.
+Training mixes an ordinary next-character loss on text with the self-printing
+loss, whose target is the model's *current* quantised table. The one global
+scale is a snapped statistic of the table and is printed too (`<Q> <SCALE>`).
+`ouroboros.verify_tm` prints every row greedily, rebuilds a child from the
+printout, checks bit-identity, measures the child's language-model loss, and
+repeats for several generations.
+
+### What did not work (and why it cannot)
+
+The first version (`ouroboros/model.py`, `train.py`, `verify.py`, kept for
+the record) used separate quantised matrices and two-digit row addresses, so the
+model had to *memorise* its own rows. Across k = 3 and ternary weights, with or
+without 80% sparsity, bidirectional soft targets, frozen targets and
+regeneration, teacher-forced self-print accuracy never left the marginal rate
+(the fraction of zeros), and greedy printouts were exactly the all-zero
+baseline. The counting argument above says why: for a weight configuration with
+entropy H, memorising it costs H bits of the H bits available. Sparsity does not
+help, because it lowers capacity (zeros store nothing) at least as fast as it
+lowers the description. Iterating "load the printout, print again" from an 80%
+printout collapsed to a trivial fixed point (a degenerate network that prints
+itself) with a broken language model (loss 5.2 versus 2.8).
 
 ## Reproduce
 
@@ -53,12 +60,11 @@ lands for ternary (k = 1) and 7-level (k = 3) weights.
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu numpy matplotlib
 curl -sL -o data.noindex/shakespeare.txt https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-.venv/bin/python -m ouroboros.train --k 1 --steps 10000 --lam_start 1500 --lam_warmup 1000 --out runs.noindex/k1
-.venv/bin/python -m ouroboros.verify runs.noindex/k1/ckpt.pt --generations 3
-.venv/bin/python -m ouroboros.evolve runs.noindex/k1/ckpt.pt --tau 1.0
+.venv/bin/python -m ouroboros.train_tm --steps 8000 --lam 1.0 --out runs.noindex/tm1
+.venv/bin/python -m ouroboros.verify_tm runs.noindex/tm1/ckpt.pt --generations 3
 ```
 
-Everything runs on a laptop CPU in minutes (125k parameters, ~25 steps/s on an M3).
+Everything runs on a laptop CPU in minutes (115k parameters, ~11 steps/s on an M3).
 
 ## Results
 
