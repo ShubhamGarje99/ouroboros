@@ -36,6 +36,7 @@ class TConfig:
     n_head: int = 4
     block_size: int = 128
     k: int = 1  # ternary
+    binary: bool = False  # codes in {-1, +1} only (no zeros)
 
 
 class RMSNorm(nn.Module):
@@ -93,18 +94,22 @@ class TableGPT(nn.Module):
     def scale_value(self):
         return self.grid[self.scale_idx]
 
+    def _quant(self, w):
+        if self.cfg.binary:
+            return torch.where(w >= 0, torch.ones_like(w), -torch.ones_like(w))
+        return torch.clamp(torch.round(w), -self.cfg.k, self.cfg.k)
+
     def effective(self):
         if self.training:
             self.refresh_scale()
         s = self.scale_value()
         w = self.T / s
-        q = torch.clamp(torch.round(w), -self.cfg.k, self.cfg.k)
+        q = self._quant(w)
         return s * (w + (q - w).detach())
 
     @torch.no_grad()
     def codes(self) -> torch.Tensor:
-        s = self.scale_value()
-        return torch.clamp(torch.round(self.T / s), -self.cfg.k, self.cfg.k).to(torch.int64)
+        return self._quant(self.T / self.scale_value()).to(torch.int64)
 
     @torch.no_grad()
     def load_codes(self, q: torch.Tensor, scale_index: int):
