@@ -22,7 +22,49 @@ reproduces its own parameters; the only prior neural-network quine (Chang & Lips
 
 ## 1. Setup
 
-_(architecture, quantisation, token layout, losses; see README for now)_
+**One table.** The model is a character-level transformer (d = 64, 2 layers, 4 heads,
+context 128) whose every parameter lives in one ternary table T of shape rows × 64.
+The first rows are the embeddings of the 65 text characters, the three value
+tokens (−1, 0, +1), three control tokens (`<Q>`, `<END>`, `<SCALE>`), 64 scale
+tokens and 64 coordinate tokens; then 128 position rows; then, per layer, the rows
+of W_q, W_k, W_v, W_o (64 each), W_1 (256), the gate G (256) and W_2ᵀ (256). That is
+2,375 rows, 152,000 ternary weights, and 2,375 tokens: every row is a token and
+every token is a row. The output head is tied to the table. Weights are the codes
+times one global scale that is snapped to a 64-level log grid and printed by
+`<Q> <SCALE>`.
+
+**Block.** Pre-norm attention; the MLP runs in parallel on the same normalised
+input and is gated by the attention contribution:
+  a = W_o · Attn(n(x)),  h = GELU(W_1 n(x)) ⊙ (1 + G a),  x ← x + a + W_2 h.
+With G = 0 this is an ordinary parallel transformer block. The gate is what makes
+"coordinate c of a copied row" a near-linear circuit.
+
+**Self-printing.** The prompt `<Q> <row r> <col c>` is answered with the value
+token for T[r][c]. The loss is a cross-entropy over the three value tokens only,
+exactly the set the printer decodes among, mixed with the next-character loss on
+Shakespeare. The target is the model's current quantised table. A full self-print
+is 152,000 three-token prompts, batched, a few seconds on a CPU.
+
+**Why the weights must be the vocabulary.** A network with weight entropy H bits
+can hold at most H bits, and a memorised description of its own weights costs
+exactly H bits, for any quantisation and any sparsity. So no model can *memorise*
+itself and still do anything else. A program quine escapes the same bound
+because its interpreter supplies a quote operation (a string literal). Here the
+embedding lookup is that operation: because weight row r is also token r, the
+model can place its own row into the residual stream and copy from it. The
+self-printing circuit then costs a fixed number of weights (identities and three
+constants) regardless of model size, and the rest of the table is free for the
+language-model task.
+
+**Constructive check.** The circuit can be written down by hand: pos₁ = +e_M and
+pos₂ = −e_M for one marker coordinate M, every head's query reads −x[M] and key
++x[M] so position 2 attends to position 1 and not to itself; W_v = W_o = I copies
+the row; W_1 = G = I on the first 64 hidden units; W_2 sends unit c to a readout
+coordinate A with a constant offset, and two gate-free units send a constant to
+coordinate Z; the value tokens embed as +e_A, −e_A, +e_Z. Installed into a fresh
+table at scale 1.5 with no training, this prints 99.99% of the 152,000 weights
+(100% of the 60 unreserved coordinates); the misses are the two marker
+coordinates, which the circuit cannot read.
 
 ## 2. Why self-printing is a capacity problem
 
