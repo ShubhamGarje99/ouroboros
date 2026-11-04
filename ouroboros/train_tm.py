@@ -40,13 +40,14 @@ def masked_ce(logits, y, mask):
 
 @torch.no_grad()
 def eval_lm(model, ids, seq, batch, n=8):
+    was = model.training
     model.eval()
     g = torch.Generator().manual_seed(1)
     tot = 0.0
     for _ in range(n):
         x, y = text_batch(ids, seq, batch, g)
         tot += F.cross_entropy(model(x)[..., : model.C].reshape(-1, model.C), y.reshape(-1)).item()
-    model.train()
+    model.train(was)
     return tot / n
 
 

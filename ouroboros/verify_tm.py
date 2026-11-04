@@ -27,6 +27,7 @@ def load(path):
 @torch.no_grad()
 def self_print(model: TableGPT, batch=4096, tau=0.0, gen=None):
     """Ask for every (row, col) weight. Greedy (tau=0) or sampled. Returns (codes, scale_idx, n_bad)."""
+    model.eval()
     d = model.cfg.d
     v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
     rows = torch.arange(model.R).repeat_interleave(d)
@@ -82,6 +83,7 @@ def main():
         rows_exact = float((printed == true).all(1).float().mean())
         child = TableGPT(parent.cfg)
         child.load_codes(printed, s_idx)
+        child.frozen_scale = True  # a rebuilt model never re-estimates its scale
         child.eval()
         same = bool(torch.equal(printed, true)) and s_idx == int(parent.scale_idx)
         child_loss = eval_lm(child, val_ids, seq, 32)
