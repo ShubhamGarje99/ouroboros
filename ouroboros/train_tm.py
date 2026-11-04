@@ -138,8 +138,8 @@ def main():
 
     protected = None
     if args.protect < 1.0:
-        from .circuit import circuit_rows
-        protected = circuit_rows(model)
+        from .circuit import circuit_mask
+        protected = circuit_mask(model)
     log, t0 = [], time.time()
     for step in range(1, args.steps + 1):
         for g in opt.param_groups:
@@ -162,11 +162,11 @@ def main():
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         if protected is not None:
-            before = model.T.detach()[protected].clone()
+            before = model.T.detach().clone()
         opt.step()
         if protected is not None:
             with torch.no_grad():
-                model.T[protected] = before + args.protect * (model.T[protected] - before)
+                model.T[protected] = before[protected] + args.protect * (model.T[protected] - before[protected])
         model.clamp_()
         if step % 50 == 0:
             print(f"step {step} lm {lm_loss.item():.3f} quine {q_loss.item():.3f} lam {lam:.1f} lr {lr_at(step):.1e} {time.time() - t0:.0f}s", flush=True)

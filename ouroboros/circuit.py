@@ -22,21 +22,21 @@ from .tm import TableGPT
 
 @torch.no_grad()
 def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
-    """Install the copy circuit in layer 0 (layer 1 is zero = identity).
+    """Install the copy circuit in layer 0 (layer 1 is zero = identity). Needs strictly causal attention.
 
-    Prompt <Q> <row r> <col c>.  No marker is placed on the row position, so the attended
-    vector is exactly the normalised row.  Reserved coordinates (all printable):
-      Q0 = d-1 : <Q> = e_Q0.                          keys read -x[Q0] - x[J] - x[J2]
-      J, J2 = d-2, d-3 : pos2 = e_J + e_J2.           queries read x[J]
-      A  = d-4 : readout (+1 -> +e_A, -1 -> -e_A).    Z = d-5 : readout for 0 (+e_Z)
-    Positions 0 and 1 have zero embeddings, so position 2 attends to position 1 because the
-    other keys are strongly negative.  Hidden units (two copies each for gain): identity units
-    for every coordinate but J, J2; difference units x[J]-x[J2] and x[J2]-x[J]; two offset
-    units reading x[J] into -A; one unit reading x[J2] into +Z.  Scale pinned near `scale`."""
+    Prompt <Q> <row r> <col c>.  Reserved coordinates (every one of them printable):
+      Q0 : <Q> = e_Q0; keys read -x[Q0] in four dims, so at position 2 the row (key ~0) beats <Q> (key -32).
+      J, J2 : pos2 = e_J + e_J2; queries read x[J].  Detector units x[J]-x[J2] / x[J2]-x[J] print J and J2.
+      Y, Y2 : text marker, +1 in every position row >= 3 and absent from prompt positions. Every circuit
+              unit subtracts x[Y] + x[Y2], so the whole circuit is silent on ordinary text.
+      A, Z  : readout. value +1 -> +e_A, -1 -> -e_A, 0 -> +e_Z.
+    Identity units (x3 for gain) compute GELU(x[c] - x[Y] - x[Y2]) * (1 + a[c]); unit counts for the
+    detectors and offsets are chosen so that after RMSNorm the offset equals the "value 0" level exactly."""
+    assert model.cfg.strict_causal, "the construction needs strictly causal attention (no self-attention)"
     d, H = model.cfg.d, model.cfg.n_head
     hd = d // H
-    Q0, J, J2, A, Z = d - 1, d - 2, d - 3, d - 4, d - 5
-    reserved = [Q0, J, J2, A, Z]
+    Q0, J, J2, Y, Y2, A, Z = d - 1, d - 2, d - 3, d - 4, d - 5, d - 6, d - 7
+    reserved = [Q0, J, J2, Y, Y2, A, Z]
     s = model.slices
     codes = model.codes().clone()
     codes.zero_()
@@ -70,34 +70,46 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     pr = torch.randint(-1, 2, (model.cfg.block_size - 3, d), generator=g)
     pr[torch.rand(pr.shape, generator=g) < 0.7] = 0
     pr[:, reserved] = 0
+    pr[:, [Y, Y2]] = 1            # text marker on every ordinary position
     codes[p0 + 3: p0 + model.cfg.block_size] = pr
     Wq, Wk, Wv, Wo = (codes[rows(f"L0.{n}")] for n in ("q", "k", "v", "o"))
-    assert model.cfg.strict_causal, "the construction needs strictly causal attention (no self-attention)"
     for h in range(H):
-        # position 2 chooses between <Q> (key -8 x 4) and the row (key ~0): the row wins for every row
         for i in range(4):
             Wq[h * hd + i, J] = 1
             Wk[h * hd + i, Q0] = -1
     Wv.copy_(torch.eye(d, dtype=codes.dtype))
     Wo.copy_(torch.eye(d, dtype=codes.dtype))
     W1, G, W2T = (codes[rows(f"L0.{n}")] for n in ("w1", "g", "w2T"))
-    # Unit counts are chosen so that, after RMSNorm, the offset equals the "value 0" level exactly:
-    # ordinary c: 3 identity units x 4.62 = offsets (2 x[J] + x[J2]) = 3 x 4.62;
-    # c = J:  5 detector units x 3.58 = 2 x 7.16 + 3.58;   c = J2: 4 x 3.58 = 2 x 3.58 + 7.16.
     u = 0
+
+    def unit(read: dict, gate: int | None, out: int, sign: int = 1):
+        nonlocal u
+        for cc, v in read.items():
+            W1[u, cc] = v
+        if Y not in read and Y2 not in read:   # text silencing; the Y/Y2 detectors are silent on text anyway
+            W1[u, Y] = -1
+            W1[u, Y2] = -1
+        if gate is not None:
+            G[u, gate] = 1
+        W2T[u, out] = sign
+        u += 1
+
     for c in range(d):
-        if c in (J, J2):
+        if c in (J, J2, Y, Y2):
             continue
         for _ in range(3):
-            W1[u, c] = 1; G[u, c] = 1; W2T[u, A] = 1; u += 1
+            unit({c: 1}, c, A)
     for _ in range(5):
-        W1[u, J] = 1; W1[u, J2] = -1; G[u, J] = 1; W2T[u, A] = 1; u += 1
+        unit({J: 1, J2: -1}, J, A)
     for _ in range(4):
-        W1[u, J2] = 1; W1[u, J] = -1; G[u, J2] = 1; W2T[u, A] = 1; u += 1
+        unit({J2: 1, J: -1}, J2, A)
+    for _ in range(3):
+        unit({Y: 1, Y2: -1}, Y, A)
+        unit({Y2: 1, Y: -1}, Y2, A)
     for _ in range(2):
-        W1[u, J] = 1; W2T[u, A] = -1; u += 1    # offset
-    W1[u, J2] = 1; W2T[u, A] = -1; u += 1       # offset
-    W1[u, J] = 1; W1[u, J2] = 1; W2T[u, Z] = 1; u += 1   # "0" logit >= 9.24 > any residual leak (<= 8)
+        unit({J: 1}, None, A, -1)          # offset
+    unit({J2: 1}, None, A, -1)             # offset
+    unit({J: 1, J2: 1}, None, Z)           # "0" logit >= 9.24 > any residual leak
     assert u <= 4 * d
     idx = int(torch.argmin((model.grid - scale).abs()))
     codes[model.SCALE0 + idx] = 0
@@ -105,6 +117,19 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     model.load_codes(codes, idx)
     model.frozen_scale = True
     return model
+
+
+def circuit_mask(model: TableGPT) -> torch.Tensor:
+    """(R, d) boolean mask of entries that must not change during training: every entry of the
+    circuit's own rows, and the reserved coordinates of every row."""
+    d = model.cfg.d
+    m = torch.zeros(model.R, d, dtype=torch.bool)
+    for name in ("ctl", "scale", "val", "coord", "L0.q", "L0.k", "L0.v", "L0.o", "L0.w1", "L0.g", "L0.w2T"):
+        a, n = model.slices[name]
+        m[a:a + n] = True
+    m[model.POS0: model.POS0 + 3] = True
+    m[:, d - 7:] = True
+    return m
 
 
 def circuit_rows(model: TableGPT) -> torch.Tensor:
