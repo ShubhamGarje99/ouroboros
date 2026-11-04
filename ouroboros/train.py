@@ -14,6 +14,18 @@ from .model import GPT, Config
 from .vocab import Vocab
 
 
+def soft_quine_loss(logits, y, mask, soft, vocab):
+    """CE against the soft target on value positions, plus hard CE on the <END> position."""
+    val_logits = logits[:, :, vocab.VAL0: vocab.VAL0 + 2 * vocab.k + 1]
+    logp = torch.log_softmax(logits, dim=-1)
+    # value positions: targets y[:, 3:3+cols] are value tokens; soft has shape (B, cols, L)
+    cols = soft.shape[1]
+    lp_vals = torch.log_softmax(val_logits[:, Vocab.PREFIX_LEN - 1: Vocab.PREFIX_LEN - 1 + cols], dim=-1)
+    ce_vals = -(soft * lp_vals).sum(-1).mean()
+    ce_end = -logp[:, -1, vocab.END].mean()
+    return ce_vals + ce_end / cols
+
+
 def masked_ce(logits, y, mask):
     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), reduction="none")
     loss = loss.view_as(y)[mask]
@@ -27,7 +39,7 @@ def build(args):
     mat_names = [n for n, _ in probe.matrices()]
     vocab = Vocab(chars, args.k, mat_names)
     cfg = Config(vocab_size=vocab.size, block_size=args.block, d=args.d, n_layer=args.n_layer,
-                 n_head=args.n_head, k=args.k, tie_head=not args.untied)
+                 n_head=args.n_head, k=args.k, tie_head=not args.untied, sparsity=args.sparsity)
     model = GPT(cfg)
     return model, vocab, cfg, train_text, val_text
 
@@ -76,12 +88,15 @@ def main():
     p.add_argument("--block", type=int, default=288)
     p.add_argument("--seq", type=int, default=256)
     p.add_argument("--untied", action="store_true")
+    p.add_argument("--sparsity", type=float, default=0.0, help="target fraction of zero codes")
     p.add_argument("--steps", type=int, default=3000)
     p.add_argument("--batch", type=int, default=32)
     p.add_argument("--qbatch", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=0.0)
     p.add_argument("--lam", type=float, default=1.0, help="weight of the self-printing loss")
+    p.add_argument("--frozen_target", action="store_true", help="diagnostic: memorise a snapshot of the codes taken at lam_start")
+    p.add_argument("--bidir", type=float, default=0.0, help="soft-target width tau (0 = hard targets)")
     p.add_argument("--lam_warmup", type=int, default=0, help="steps over which lam ramps 0->lam")
     p.add_argument("--lam_start", type=int, default=0, help="step at which the quine loss switches on")
     p.add_argument("--warmup", type=int, default=200)
@@ -116,9 +131,13 @@ def main():
 
     log = []
     t0 = time.time()
+    prev_codes = {n: q.clone() for n, (q, _) in model.codes().items()}
     for step in range(1, args.steps + 1):
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
+        if args.frozen_target and step == args.lam_start and qb.frozen is None:
+            qb.frozen = {n: q.clone() for n, (q, _) in model.codes().items()}
+            print("froze quine targets", flush=True)
         if step < args.lam_start:
             lam = 0.0
         elif args.lam_warmup:
@@ -128,8 +147,12 @@ def main():
 
         x, y = tb()
         lm_loss = F.cross_entropy(model(x).reshape(-1, cfg.vocab_size), y.reshape(-1))
-        qx, qy, qm = qb()
-        q_loss = masked_ce(model(qx), qy, qm)
+        if args.bidir > 0:
+            qx, qy, qm, qsoft = qb(args.bidir)
+            q_loss = soft_quine_loss(model(qx), qy, qm, qsoft, vocab)
+        else:
+            qx, qy, qm = qb()
+            q_loss = masked_ce(model(qx), qy, qm)
         loss = lm_loss + lam * q_loss
         if step % 10 == 0:
             sx, sy, sm = qb.scale_batch()
@@ -145,8 +168,11 @@ def main():
             print(f"step {step} lm {lm_loss.item():.3f} quine {q_loss.item():.3f} lam {lam:.2f} "
                   f"lr {lr_at(step):.2e} {time.time() - t0:.0f}s", flush=True)
         if step % args.eval_every == 0 or step == args.steps:
+            cur = model.codes()
+            churn = sum(int((cur[n][0] != prev_codes[n]).sum()) for n in prev_codes) / model.n_params()
+            prev_codes = {n: q.clone() for n, (q, _) in cur.items()}
             rec = {"step": step, "lm_train": lm_loss.item(), "lm_val": eval_lm(model, vb),
-                   **eval_quine_tf(model, qb, gen=gen), **model.code_stats(), "t": time.time() - t0}
+                   **eval_quine_tf(model, qb, gen=gen), **model.code_stats(), "churn": churn, "t": time.time() - t0}
             log.append(rec)
             print("EVAL " + json.dumps(rec), flush=True)
             torch.save({"model": model.state_dict(), "cfg": cfg.__dict__, "chars": vocab.chars,

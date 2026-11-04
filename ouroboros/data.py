@@ -36,13 +36,25 @@ class QuineBatches:
     def __init__(self, model: GPT, vocab: Vocab, batch: int, gen: torch.Generator):
         self.model, self.vocab, self.batch, self.gen = model, vocab, batch, gen
         self.mats = model.matrices()
+        self.frozen = None  # optional dict name -> codes, used instead of the live weights
         rows = torch.tensor([m.rows for _, m in self.mats], dtype=torch.float32)
         self.mat_probs = rows / rows.sum()
 
-    def rows_of(self, name: str, mat, rows: torch.Tensor):
-        """Build (x, y, mask) for the given row indices of one matrix."""
-        q = mat.q()[rows]  # (B, cols) ints, no grad
+    def rows_of(self, name: str, mat, rows: torch.Tensor, soft_tau: float = 0.0):
+        """Build (x, y, mask[, soft]) for the given row indices of one matrix.
+
+        With soft_tau > 0 also return a differentiable soft target over value
+        tokens: p(q') ~ exp(-((w/s - q') / tau)^2 / 2), which pulls the shadow
+        weight toward whatever level the model predicts (bidirectional
+        consistency), not only the prediction toward the weight.
+        """
+        q = (self.frozen[name] if self.frozen is not None else mat.q())[rows]  # (B, cols) ints, no grad
         B, cols = q.shape
+        soft = None
+        if soft_tau > 0:
+            w = mat.weight[rows] / mat.scale_value()  # (B, cols), grad to weight
+            levels = torch.arange(-mat.k, mat.k + 1, dtype=torch.float32)
+            soft = torch.softmax(-0.5 * ((w[..., None] - levels) / soft_tau) ** 2, dim=-1)  # (B, cols, 2k+1)
         prefix = torch.tensor([self.vocab.row_prefix(name, int(r)) for r in rows])  # (B, 4)
         vals = q + (self.vocab.VAL0 + self.vocab.k)
         end = torch.full((B, 1), self.vocab.END)
@@ -50,13 +62,15 @@ class QuineBatches:
         x, y = seq[:, :-1], seq[:, 1:]
         mask = torch.zeros_like(y, dtype=torch.bool)
         mask[:, Vocab.PREFIX_LEN - 1:] = True
-        return x, y, mask
+        if soft is None:
+            return x, y, mask
+        return x, y, mask, soft
 
-    def __call__(self):
+    def __call__(self, soft_tau: float = 0.0):
         mi = int(torch.multinomial(self.mat_probs, 1, generator=self.gen))
         name, mat = self.mats[mi]
         rows = torch.randint(0, mat.rows, (min(self.batch, mat.rows),), generator=self.gen)
-        return self.rows_of(name, mat, rows)
+        return self.rows_of(name, mat, rows, soft_tau)
 
     def scale_batch(self):
         """All per-matrix scales: <Q> <MAT_m> <SCALE> -> S_i <END>."""

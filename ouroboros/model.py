@@ -35,9 +35,12 @@ class QMatrix(nn.Module):
     all quantize with exactly the same scale.
     """
 
-    def __init__(self, rows: int, cols: int, k: int, init_std: float):
+    sparsity: float = 0.0  # class-level default; GPT sets it from Config
+
+    def __init__(self, rows: int, cols: int, k: int, init_std: float, sparsity: float = 0.0):
         super().__init__()
         self.rows, self.cols, self.k = rows, cols, k
+        self.sparsity = sparsity
         self.weight = nn.Parameter(torch.randn(rows, cols) * init_std)
         self.register_buffer("scale_idx", torch.tensor(0, dtype=torch.int64))
         self.register_buffer("grid", scale_grid())
@@ -47,7 +50,15 @@ class QMatrix(nn.Module):
     # --- scale -------------------------------------------------------------
     @torch.no_grad()
     def refresh_scale(self) -> None:
-        target = self.beta * self.weight.abs().mean() / self.k
+        if self.sparsity > 0:
+            # choose the scale so that about `sparsity` of the weights round to zero
+            a = self.weight.abs().flatten()
+            n = min(a.numel(), 65536)
+            if a.numel() > n:
+                a = a[torch.randint(0, a.numel(), (n,))]
+            target = 2.0 * torch.quantile(a, self.sparsity)
+        else:
+            target = self.beta * self.weight.abs().mean() / self.k
         self.scale_idx.copy_(torch.argmin((self.grid - target).abs()))
 
     def scale_index(self) -> int:
@@ -92,16 +103,16 @@ class RMSNorm(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, d: int, n_head: int, k: int):
+    def __init__(self, d: int, n_head: int, k: int, sparsity: float = 0.0):
         super().__init__()
         self.d, self.n_head = d, n_head
         std = 0.02
-        self.q = QMatrix(d, d, k, std)
-        self.k_ = QMatrix(d, d, k, std)
-        self.v = QMatrix(d, d, k, std)
-        self.o = QMatrix(d, d, k, std)
-        self.w1 = QMatrix(4 * d, d, k, std)
-        self.w2 = QMatrix(d, 4 * d, k, std)
+        self.q = QMatrix(d, d, k, std, sparsity)
+        self.k_ = QMatrix(d, d, k, std, sparsity)
+        self.v = QMatrix(d, d, k, std, sparsity)
+        self.o = QMatrix(d, d, k, std, sparsity)
+        self.w1 = QMatrix(4 * d, d, k, std, sparsity)
+        self.w2 = QMatrix(d, 4 * d, k, std, sparsity)
         self.n1, self.n2 = RMSNorm(), RMSNorm()
 
     def matrices(self, prefix: str) -> list[tuple[str, QMatrix]]:
@@ -131,16 +142,18 @@ class Config:
     n_head: int = 4
     k: int = 3  # integer codes in [-k, k]  -> 2k+1 levels
     tie_head: bool = True
+    sparsity: float = 0.0  # target fraction of zero codes (0 = BitNet-style mean|w| scale)
 
 
 class GPT(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
-        self.tok = QMatrix(cfg.vocab_size, cfg.d, cfg.k, 0.02)
-        self.pos = QMatrix(cfg.block_size, cfg.d, cfg.k, 0.02)
-        self.blocks = nn.ModuleList(Block(cfg.d, cfg.n_head, cfg.k) for _ in range(cfg.n_layer))
-        self.head = None if cfg.tie_head else QMatrix(cfg.vocab_size, cfg.d, cfg.k, 0.02)
+        sp = cfg.sparsity
+        self.tok = QMatrix(cfg.vocab_size, cfg.d, cfg.k, 0.02, sp)
+        self.pos = QMatrix(cfg.block_size, cfg.d, cfg.k, 0.02, sp)
+        self.blocks = nn.ModuleList(Block(cfg.d, cfg.n_head, cfg.k, sp) for _ in range(cfg.n_layer))
+        self.head = None if cfg.tie_head else QMatrix(cfg.vocab_size, cfg.d, cfg.k, 0.02, sp)
         self.norm = RMSNorm()
 
     # --- the registry of everything that has to be printed -----------------
