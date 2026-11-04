@@ -16,14 +16,45 @@ from .vocab import Vocab
 
 def soft_quine_loss(logits, y, mask, soft, vocab):
     """CE against the soft target on value positions, plus hard CE on the <END> position."""
-    val_logits = logits[:, :, vocab.VAL0: vocab.VAL0 + 2 * vocab.k + 1]
-    logp = torch.log_softmax(logits, dim=-1)
-    # value positions: targets y[:, 3:3+cols] are value tokens; soft has shape (B, cols, L)
+    logp = torch.log_softmax(logits, dim=-1)  # full vocabulary, so mass on non-value tokens is penalised
     cols = soft.shape[1]
-    lp_vals = torch.log_softmax(val_logits[:, Vocab.PREFIX_LEN - 1: Vocab.PREFIX_LEN - 1 + cols], dim=-1)
+    lp_vals = logp[:, Vocab.PREFIX_LEN - 1: Vocab.PREFIX_LEN - 1 + cols, vocab.VAL0: vocab.VAL0 + 2 * vocab.k + 1]
     ce_vals = -(soft * lp_vals).sum(-1).mean()
     ce_end = -logp[:, -1, vocab.END].mean()
     return ce_vals + ce_end / cols
+
+
+@torch.no_grad()
+def regenerate(model, qb: QuineBatches, conf: float, batch_rows: int = 128) -> dict:
+    """Overwrite weights with the model's own confident predictions about them.
+
+    For every row of every matrix, run the self-print prompt teacher-forced,
+    take the restricted argmax over value tokens and its probability, and
+    where the model is at least `conf` sure of a value that differs from the
+    stored code, set the shadow weight to that value.  Returns counts.
+    """
+    model.eval()
+    v0, v1 = qb.vocab.VAL0, qb.vocab.VAL0 + 2 * qb.vocab.k + 1
+    changed = total = 0
+    for name, mat in qb.mats:
+        s = mat.scale_value()
+        for r0 in range(0, mat.rows, batch_rows):
+            rows = torch.arange(r0, min(mat.rows, r0 + batch_rows))
+            x, y, mask = qb.rows_of(name, mat, rows)
+            logits = model(x)[:, Vocab.PREFIX_LEN - 1: Vocab.PREFIX_LEN - 1 + mat.cols, v0:v1]
+            p = torch.softmax(logits, -1)
+            pconf, pred = p.max(-1)
+            pred = pred - qb.vocab.k  # back to integer codes
+            cur = mat.q()[rows]
+            flip = (pconf >= conf) & (pred != cur)
+            if flip.any():
+                w = mat.weight[rows]
+                w[flip] = pred[flip].to(torch.float32) * s
+                mat.weight[rows] = w
+                changed += int(flip.sum())
+            total += cur.numel()
+    model.train()
+    return {"regen_changed": changed, "regen_frac": changed / total}
 
 
 def masked_ce(logits, y, mask):
@@ -64,7 +95,12 @@ def eval_quine_tf(model, qb: QuineBatches, n_rows=256, gen=None):
         take = max(1, round(n_rows * mat.rows / sum(m.rows for _, m in qb.mats)))
         rows = torch.randint(0, mat.rows, (min(take, mat.rows),), generator=gen)
         x, y, mask = qb.rows_of(name, mat, rows)
-        pred = model(x).argmax(-1)
+        logits = model(x)
+        pred = logits.argmax(-1)
+        # at value positions the printer only ever chooses among value tokens; measure the same way
+        v0, v1 = qb.vocab.VAL0, qb.vocab.VAL0 + 2 * qb.vocab.k + 1
+        pred_val = logits[:, :, v0:v1].argmax(-1) + v0
+        pred = torch.where((y >= v0) & (y < v1), pred_val, pred)
         ok = (pred == y) | ~mask
         tok_correct += int(((pred == y) & mask).sum())
         tok_total += int(mask.sum())
@@ -96,6 +132,9 @@ def main():
     p.add_argument("--wd", type=float, default=0.0)
     p.add_argument("--lam", type=float, default=1.0, help="weight of the self-printing loss")
     p.add_argument("--frozen_target", action="store_true", help="diagnostic: memorise a snapshot of the codes taken at lam_start")
+    p.add_argument("--regen_every", type=int, default=0, help="every N steps overwrite weights with confident self-predictions")
+    p.add_argument("--regen_conf", type=float, default=0.9)
+    p.add_argument("--regen_start", type=int, default=0)
     p.add_argument("--bidir", type=float, default=0.0, help="soft-target width tau (0 = hard targets)")
     p.add_argument("--lam_warmup", type=int, default=0, help="steps over which lam ramps 0->lam")
     p.add_argument("--lam_start", type=int, default=0, help="step at which the quine loss switches on")
@@ -163,6 +202,9 @@ def main():
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         model.clamp_()
+        if args.regen_every and step >= args.regen_start and step % args.regen_every == 0:
+            rg = regenerate(model, qb, args.regen_conf)
+            print(f"regen step {step}: changed {rg['regen_changed']} ({100 * rg['regen_frac']:.2f}%)", flush=True)
 
         if step % 50 == 0:
             print(f"step {step} lm {lm_loss.item():.3f} quine {q_loss.item():.3f} lam {lam:.2f} "
