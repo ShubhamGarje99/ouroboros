@@ -1,6 +1,6 @@
 # Ouroboros: a language model that prints its own weights
 
-**Status: work in progress (2026-11-05). Numbers below are filled in from `runs.noindex/*/verify.json` as runs finish.**
+**Status (2026-11-05): the exact self-printer exists and is verified; the joint language-model result is being trained. Every number in this README is printed by a script in the repo.**
 
 Ouroboros is a small character-level GPT with one unusual ability: ask it for
 any row of any of its own weight matrices and it answers with the exact
@@ -68,7 +68,43 @@ Everything runs on a laptop CPU in minutes (115k parameters, ~11 steps/s on an M
 
 ## Results
 
-_(pending)_
+All numbers below are produced by the scripts in this repo on a laptop CPU
+(M3, 8 GB), with checkpoints under `runs.noindex/`. The model is 2,375 rows × 64
+= 152,000 ternary weights, 2 layers, 4 heads, context 128.
+
+**1. An exact self-printer exists (constructive).** `ouroboros.circuit.install_copy_circuit`
+writes the copy circuit into layer 0 of a fresh table (layer 1 zero). With no
+training at all it answers all 152,000 `<Q> <row> <col>` prompts correctly and
+prints its scale token. `ouroboros.verify_tm` loads the printout into an empty
+model and finds it **bit-identical** to the printer; that child's printout is
+bit-identical too, for every generation we ran (3).
+
+| model | self-print exact | rows exact | child bit-identical | LM val loss |
+|---|---|---|---|---|
+| constructed circuit, no training | 152,000 / 152,000 | 2,375 / 2,375 | yes (3 generations) | untrained |
+| constructed circuit + LM training, circuit entries frozen (tm16) | _(pending)_ | | | _(pending)_ |
+| learned from scratch, ternary, scale 0.10 (tm2) | 77.7 % | 0 % | no | 2.50 |
+| learned from scratch, ternary, scale 0.50 (tm9, 6k steps) | 69 % | 0 % | – | 2.42 |
+| learned from scratch, binary ±1, scale 0.15 (tm13) | 79.8 % | 0 % | no | 2.18 |
+
+**2. What training discovers on its own.** With the gated block, joint training
+finds a partial copy circuit from random initialisation within ~2,000 steps
+(`figures/training.png`). Analysing tm2's errors shows what it is: the model reads
+the *sign* of a weight well (88 % on −1, 91 % on +1) but cannot tell *zero* apart
+(27 %, chance), i.e. it learns a linear sign readout but not the magnitude decision,
+which needs a clean copy and a constant offset. Binary weights remove the zero
+class and reach 80 %. The remaining 20 % are sign errors from an attention copy
+that is not sharp; at the small scales training prefers, attention scores are
+bounded by the weight scale squared.
+
+**3. Memorising oneself does not work, for a reason.** Section "What did not work"
+above: with ordinary matrices and two-digit addresses, no run left the marginal
+rate, and freezing the target did not help (31 % after 2,000 steps). A network's
+weights can hold at most as many bits as they contain, so a model can only print
+itself through a quote mechanism, which here is the embedding lookup.
+
+Figures: `figures/training.png` (self-print accuracy, LM loss and zero fraction
+for the learned runs).
 
 ## Related work
 
