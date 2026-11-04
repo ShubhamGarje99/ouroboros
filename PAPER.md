@@ -156,8 +156,11 @@ weights was just as slow. The counting argument in Section 2 says why.
 
 Printing with sampling noise turns the printer into a reproduction operator with
 a mutation rate set by the temperature. At τ = 1.5 about 16 % of the weights
-mutate and the children are not viable; the margins on zero-valued weights are
-small, so interesting rates need τ ≲ 0.3. We report this as a demo, not a result.
+mutate; at τ = 0.3 about 1 %. Both are lethal: the child's loss rises (2.95 → 6.1
+at 1 %) and the child can no longer print itself, so the lineage collapses in a
+single generation. The copier is part of what it copies and random mutation hits
+it in proportion to its size; a viable operator would have to spare the circuit.
+Reported as a demo, not a result.
 
 ## 4. Limitations
 

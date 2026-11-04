@@ -104,13 +104,24 @@ weights can hold at most as many bits as they contain, so a model can only print
 itself through a quote mechanism, which here is the embedding lookup.
 
 **4. Reproduction with mutation.** `ouroboros.evolve_tm` prints with sampling
-noise. At τ = 1.5 about 16 % of the weights mutate and the child is not viable
-(LM loss 18+, and it cannot print itself); the margins on zero-valued weights are
-small, so useful mutation rates need τ ≲ 0.3 (see `runs.noindex/*/evolve_tau*.json`).
+noise instead of the argmax. At τ = 1.5 about 16 % of the weights mutate; at
+τ = 0.3 about 1 % (1,600 weights). Both are lethal: the child's LM loss jumps
+(2.95 → 6.1 at 1 %) and, more tellingly, the child can no longer print itself,
+so the lineage collapses in one generation. The copier is part of the genome it
+copies, and random mutations hit it in proportion to its size. A viable
+mutation operator would have to spare the circuit, which is what the training
+mask does. Reported as a demo, not a result (`runs.noindex/*/evolve_tau*.json`).
 
 Figures: `figures/training.png` (self-print accuracy, LM loss and zero fraction;
 the tm18 curve shows the language model learning while self-print stays at 100 %)
 and `figures/generations.png`.
+
+## One line for a resume
+
+Built Ouroboros, the first transformer that prints its own weights exactly: a
+152k-parameter character LM whose vocabulary is its own weight rows; proved
+memorisation cannot work, hand-built and verified a bit-exact self-copy circuit,
+and trained the LM on top of it without losing exactness (CPU only).
 
 ## Related work
 
