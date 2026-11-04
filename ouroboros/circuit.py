@@ -111,6 +111,21 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     unit({J2: 1}, None, A, -1)             # offset
     unit({J: 1, J2: 1}, None, Z)           # "0" logit >= 9.24 > any residual leak
     assert u <= 4 * d
+    # layer 1: random ternary so the language model has a network to train from step 0, but silent on
+    # the self-print prompt: its MLP units subtract the query markers (present only at position 2), it never
+    # writes the readout coordinates (W_o rows A, Z and all reserved coordinates are zero).
+    for l in range(1, model.cfg.n_layer):
+        for name in ("q", "k", "v", "o", "w1", "g", "w2T"):
+            r = rows(f"L{l}.{name}")
+            blk = torch.randint(-1, 2, (r.stop - r.start, d), generator=g)
+            blk[torch.rand(blk.shape, generator=g) < 0.5] = 0
+            blk[:, reserved] = 0
+            if name == "w1":
+                blk[:, J] = -1
+                blk[:, J2] = -1
+            if name == "o":
+                blk[[A, Z]] = 0
+            codes[r] = blk
     idx = int(torch.argmin((model.grid - scale).abs()))
     codes[model.SCALE0 + idx] = 0
     codes[model.SCALE0 + idx, 1] = 1
@@ -129,6 +144,9 @@ def circuit_mask(model: TableGPT) -> torch.Tensor:
         m[a:a + n] = True
     m[model.POS0: model.POS0 + 3] = True
     m[:, d - 7:] = True
+    for l in range(1, model.cfg.n_layer):
+        a, n = model.slices[f"L{l}.o"]
+        m[[a + d - 6, a + d - 7]] = True  # W_o rows for the readout coordinates A, Z stay zero
     return m
 
 
