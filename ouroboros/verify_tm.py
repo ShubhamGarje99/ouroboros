@@ -19,6 +19,7 @@ def load(path):
     cfg = TConfig(**ck["cfg"])
     model = TableGPT(cfg)
     model.load_state_dict(ck["model"])
+    model.frozen_scale = True  # a saved model never re-estimates its scale
     model.eval()
     return model, ck
 

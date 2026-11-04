@@ -92,6 +92,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--resume", default=None)
+    p.add_argument("--init_circuit", action="store_true", help="start from the hand-installed copy circuit (frozen scale)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -102,8 +103,12 @@ def main():
     train_text, val_text, chars = load_text(args.data)
     cfg = TConfig(chars=chars, d=args.d, n_layer=args.n_layer, n_head=args.n_head, block_size=args.block)
     model = TableGPT(cfg)
+    if args.init_circuit:
+        from .circuit import install_copy_circuit
+        install_copy_circuit(model)
     if args.resume:
         model.load_state_dict(torch.load(args.resume)["model"])
+        model.frozen_scale = bool(torch.load(args.resume).get("frozen_scale", False))
     train_ids = torch.tensor(model.encode_text(train_text))
     val_ids = torch.tensor(model.encode_text(val_text))
     print(f"rows/tokens={model.R} params={model.n_params():,}", flush=True)
@@ -146,7 +151,8 @@ def main():
                    "scale_idx": int(model.scale_idx), "t": time.time() - t0}
             log.append(rec)
             print("EVAL " + json.dumps(rec), flush=True)
-            torch.save({"model": model.state_dict(), "cfg": cfg.__dict__, "args": vars(args)}, os.path.join(args.out, "ckpt.pt"))
+            torch.save({"model": model.state_dict(), "cfg": cfg.__dict__, "args": vars(args), "frozen_scale": model.frozen_scale},
+                       os.path.join(args.out, "ckpt.pt"))
             json.dump(log, open(os.path.join(args.out, "log.json"), "w"), indent=1)
 
 

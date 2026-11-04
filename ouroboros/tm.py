@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 N_SCALE_LEVELS = 64
-LOG2_SCALE_MIN, LOG2_SCALE_MAX = -12.0, -1.0
+LOG2_SCALE_MIN, LOG2_SCALE_MAX = -12.0, 1.0
 
 
 def scale_grid() -> torch.Tensor:
