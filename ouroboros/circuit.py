@@ -92,3 +92,13 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     model.load_codes(codes, idx)
     model.frozen_scale = True
     return model
+
+
+def circuit_rows(model: TableGPT) -> torch.Tensor:
+    """Indices of the rows the hand-installed circuit depends on (for damped updates)."""
+    s = model.slices
+    idx = [model.Q, model.POS0 + 1, model.POS0 + 2]
+    for name in ("val", "coord", "L0.q", "L0.k", "L0.v", "L0.o", "L0.w1", "L0.g", "L0.w2T"):
+        a, n = s[name]
+        idx += list(range(a, a + n))
+    return torch.tensor(sorted(set(idx)))

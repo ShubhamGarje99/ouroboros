@@ -93,6 +93,7 @@ def main():
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--resume", default=None)
     p.add_argument("--init_circuit", action="store_true", help="start from the hand-installed copy circuit (frozen scale)")
+    p.add_argument("--protect", type=float, default=1.0, help="multiply updates to the circuit rows by this factor (<1 protects the hand-installed circuit)")
     p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule)")
     args = p.parse_args()
 
@@ -127,6 +128,10 @@ def main():
         t = (step - args.warmup) / max(1, args.steps - args.warmup)
         return args.lr * (0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * t)))
 
+    protected = None
+    if args.protect < 1.0:
+        from .circuit import circuit_rows
+        protected = circuit_rows(model)
     log, t0 = [], time.time()
     for step in range(1, args.steps + 1):
         for g in opt.param_groups:
@@ -148,7 +153,12 @@ def main():
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if protected is not None:
+            before = model.T.detach()[protected].clone()
         opt.step()
+        if protected is not None:
+            with torch.no_grad():
+                model.T[protected] = before + args.protect * (model.T[protected] - before)
         model.clamp_()
         if step % 50 == 0:
             print(f"step {step} lm {lm_loss.item():.3f} quine {q_loss.item():.3f} lam {lam:.1f} lr {lr_at(step):.1e} {time.time() - t0:.0f}s", flush=True)
