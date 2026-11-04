@@ -93,6 +93,7 @@ def main():
     p.add_argument("--threads", type=int, default=4)
     p.add_argument("--resume", default=None)
     p.add_argument("--init_circuit", action="store_true", help="start from the hand-installed copy circuit (frozen scale)")
+    p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -106,6 +107,11 @@ def main():
     if args.init_circuit:
         from .circuit import install_copy_circuit
         install_copy_circuit(model)
+    elif args.scale > 0:
+        with torch.no_grad():
+            model.scale_idx.fill_(int(torch.argmin((model.grid - args.scale).abs())))
+            model.T.mul_(float(model.scale_value()) / 0.02)  # keep the init's code distribution
+        model.frozen_scale = True
     if args.resume:
         model.load_state_dict(torch.load(args.resume)["model"])
         model.frozen_scale = bool(torch.load(args.resume).get("frozen_scale", False))
@@ -132,7 +138,9 @@ def main():
         rows = torch.randint(0, model.R, (args.qbatch,), generator=gen)
         cols = torch.randint(0, model.cfg.d, (args.qbatch,), generator=gen)
         qx, qy = quine_batch(model, rows, cols)
-        q_loss = F.cross_entropy(model(qx)[:, -1], qy[:, 0])
+        v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
+        # the answer is one of the value tokens, so the loss is over those tokens only (as the printer decodes)
+        q_loss = F.cross_entropy(model(qx)[:, -1, v0:v1], qy[:, 0] - v0)
         loss = lm_loss + lam * q_loss
         if step % 10 == 0:
             sx, sy, sm = scale_batch(model)
