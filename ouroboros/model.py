@@ -36,6 +36,7 @@ class QMatrix(nn.Module):
     """
 
     sparsity: float = 0.0  # class-level default; GPT sets it from Config
+    frozen_scale: bool = False  # when True, refresh_scale() is a no-op (set by GPT.freeze_scales)
 
     def __init__(self, rows: int, cols: int, k: int, init_std: float, sparsity: float = 0.0):
         super().__init__()
@@ -50,6 +51,8 @@ class QMatrix(nn.Module):
     # --- scale -------------------------------------------------------------
     @torch.no_grad()
     def refresh_scale(self) -> None:
+        if self.frozen_scale:
+            return
         if self.sparsity > 0:
             # choose the scale so that about `sparsity` of the weights round to zero
             a = self.weight.abs().flatten()
@@ -194,6 +197,11 @@ class GPT(nn.Module):
     def clamp_(self) -> None:
         for _, m in self.matrices():
             m.clamp_()
+
+    def freeze_scales(self) -> None:
+        """Stop recomputing scales; from now on the zero fraction is free to move."""
+        for _, m in self.matrices():
+            m.frozen_scale = True
 
     @torch.no_grad()
     def code_stats(self) -> dict[str, float]:

@@ -26,8 +26,31 @@ _(architecture, quantisation, token layout, losses; see README for now)_
 
 ## 2. Why self-printing is a capacity problem
 
-_(N·log2(2k+1) bits of description vs ~2 bits/parameter of capacity; structure
-as the way out; the self-printing loss as description-length pressure)_
+A network with N quantised parameters, each taking one of 2k+1 values, has a
+description of N·log2(2k+1) bits if the values are unstructured. Its ability to
+store arbitrary facts is bounded by a few bits per parameter: about 2 bits per
+parameter for knowledge learned from text (Allen-Zhu & Li, 2024) and about 3.6
+bits per parameter for raw memorisation of random data (Morris et al., 2025).
+With k = 3 the description costs 2.8 bits per weight, so a 7-level network can
+only print itself if its weights are far from random. With ternary weights and
+80% zeros, the description costs about 0.9 bits per weight (the entropy of the
+code distribution), and self-printing fits inside the memorisation budget with
+room left over for the language-model task.
+
+Two mechanisms push the weights toward self-consistency during training. The
+first is the self-printing loss itself, whose target is the current quantised
+weights. The second is a *bidirectional* form of that loss: the target is a
+soft distribution over levels derived from the shadow weight's distance to the
+rounding boundaries, and gradients flow into the shadow weight, so a weight that
+the model confidently "remembers" as zero is pulled toward zero. A third,
+discrete mechanism, regeneration, overwrites a weight with the model's own
+prediction when the model is confident and disagrees, following Chang & Lipson.
+
+Experimentally, the moving target is not the bottleneck: freezing a snapshot of
+the weights and training only the self-printing loss against it memorises just as
+slowly (31% of a 7-level snapshot after 2,000 steps) as the live target. The
+bottleneck is the number of passes over the rows: memorising ~1,600 rows of
+near-random symbols is a many-epoch problem.
 
 ## 3. Experiments
 

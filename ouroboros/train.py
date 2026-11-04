@@ -135,6 +135,7 @@ def main():
     p.add_argument("--regen_every", type=int, default=0, help="every N steps overwrite weights with confident self-predictions")
     p.add_argument("--regen_conf", type=float, default=0.9)
     p.add_argument("--regen_start", type=int, default=0)
+    p.add_argument("--freeze_scale_at", type=int, default=0, help="step after which per-matrix scales stop being recomputed")
     p.add_argument("--bidir", type=float, default=0.0, help="soft-target width tau (0 = hard targets)")
     p.add_argument("--lam_warmup", type=int, default=0, help="steps over which lam ramps 0->lam")
     p.add_argument("--lam_start", type=int, default=0, help="step at which the quine loss switches on")
@@ -177,6 +178,9 @@ def main():
         if args.frozen_target and step == args.lam_start and qb.frozen is None:
             qb.frozen = {n: q.clone() for n, (q, _) in model.codes().items()}
             print("froze quine targets", flush=True)
+        if args.freeze_scale_at and step == args.freeze_scale_at:
+            model.freeze_scales()
+            print("froze scales", flush=True)
         if step < args.lam_start:
             lam = 0.0
         elif args.lam_warmup:
