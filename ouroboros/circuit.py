@@ -82,11 +82,11 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     W1, G, W2T = (codes[rows(f"L0.{n}")] for n in ("w1", "g", "w2T"))
     u = 0
 
-    def unit(read: dict, gate: int | None, out: int, sign: int = 1):
+    def unit(read: dict, gate: int | None, out: int, sign: int = 1, silence: bool = False):
         nonlocal u
         for cc, v in read.items():
             W1[u, cc] = v
-        if Y not in read and Y2 not in read:   # text silencing; the Y/Y2 detectors are silent on text anyway
+        if silence:  # identity units read x[c], which is nonzero on text: subtract the text markers
             W1[u, Y] = -1
             W1[u, Y2] = -1
         if gate is not None:
@@ -98,7 +98,7 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
         if c in (J, J2, Y, Y2):
             continue
         for _ in range(3):
-            unit({c: 1}, c, A)
+            unit({c: 1}, c, A, silence=True)
     for _ in range(5):
         unit({J: 1, J2: -1}, J, A)
     for _ in range(4):
