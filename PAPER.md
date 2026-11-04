@@ -117,14 +117,15 @@ The constructed circuit prints 152,000/152,000 weights with no training. Trainin
 the language model on top of it, with the circuit's own entries and the reserved
 coordinates of every row held fixed (the free rows are the 65 character
 embeddings, 125 position rows, the second layer and the unused hidden units of the
-first), reaches a validation loss of 2.95 nats/char in 6,000 steps while the
-self-print stays exact at every checkpoint. `verify_tm` then prints the trained
+first), reaches a validation loss of 2.95 nats/char in 6,000 steps (2.89 after a further
+4,000 steps at a lower learning rate) while the self-print stays exact at every
+checkpoint. `verify_tm` then prints the trained
 model, loads the printout into an empty model, and finds it bit-identical,
 scale included; that child's printout is bit-identical too, for the three
 generations we ran. This is the first language model that reproduces its own
 parameters exactly.
 
-The language model is weak (2.95 nats/char; a plain 2-layer model of this size
+The language model is weak (2.89 nats/char; a plain 2-layer model of this size
 reaches about 2.2 to 2.5), because the circuit occupies the first layer and seven
 of the 64 coordinates, and because training at the weight scale the circuit needs
 (1.5) is noisy. Random initialisation of the second layer, kept silent on the

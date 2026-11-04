@@ -1,6 +1,6 @@
 # Ouroboros: a language model that prints its own weights
 
-**Status (2026-11-05): done for v1. A 152,000-weight character model trained on Shakespeare (val loss 2.95 nats/char) prints all of its own weights exactly; the printout, loaded into an empty model, is bit-identical, and so is its own printout. Every number in this README is printed by a script in the repo.**
+**Status (2026-11-05): done for v1. A 152,000-weight character model trained on Shakespeare (val loss 2.89 nats/char) prints all of its own weights exactly; the printout, loaded into an empty model, is bit-identical, and so is its own printout. Every number in this README is printed by a script in the repo.**
 
 Ouroboros is a small character-level GPT with one unusual ability: ask it for
 any row of any of its own weight matrices and it answers with the exact
@@ -82,7 +82,8 @@ bit-identical too, for every generation we ran (3).
 | model | self-print exact | rows exact | child bit-identical | LM val loss |
 |---|---|---|---|---|
 | constructed circuit, no training | 152,000 / 152,000 | 2,375 / 2,375 | yes (3 generations) | untrained |
-| **constructed circuit + LM training, circuit entries frozen (tm18)** | **152,000 / 152,000** | **2,375 / 2,375** | **yes (3 generations)** | **2.95** |
+| constructed circuit + LM training, circuit entries frozen (tm18, 6k steps) | 152,000 / 152,000 | 2,375 / 2,375 | yes (3 generations) | 2.95 |
+| **same, + 4k steps fine-tune at lr 1e-3 (tm19)** | **152,000 / 152,000** | **2,375 / 2,375** | **yes (3 generations)** | **2.89** |
 | learned from scratch, ternary, scale 0.10 (tm2) | 77.7 % | 0 % | no | 2.50 |
 | learned from scratch, ternary, scale 0.50 (tm9, 6k steps) | 69 % | 0 % | – | 2.42 |
 | learned from scratch, binary ±1, scale 0.15 (tm13) | 79.8 % | 0 % | no | 2.18 |
