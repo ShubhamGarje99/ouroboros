@@ -56,15 +56,27 @@ self-printing circuit then costs a fixed number of weights (identities and three
 constants) regardless of model size, and the rest of the table is free for the
 language-model task.
 
-**Constructive check.** The circuit can be written down by hand: pos₁ = +e_M and
-pos₂ = −e_M for one marker coordinate M, every head's query reads −x[M] and key
-+x[M] so position 2 attends to position 1 and not to itself; W_v = W_o = I copies
-the row; W_1 = G = I on the first 64 hidden units; W_2 sends unit c to a readout
-coordinate A with a constant offset, and two gate-free units send a constant to
-coordinate Z; the value tokens embed as +e_A, −e_A, +e_Z. Installed into a fresh
-table at scale 1.5 with no training, this prints 99.99% of the 152,000 weights
-(100% of the 60 unreserved coordinates); the misses are the two marker
-coordinates, which the circuit cannot read.
+**Constructive check.** The circuit can be written down by hand, and doing so is
+what turned up the two architectural requirements. Attention is *strictly causal*
+(a position never attends to itself); otherwise every row whose content resembles
+the attention markers (the `<Q>` row, the key-reader rows, the marker position row)
+makes position 2 attend to itself instead of to the row. Seven coordinates of the
+64 are reserved: `<Q>` = e_Q0 and every head's keys read −x[Q0] in four
+dimensions, so at the answer position the row (key ≈ 0) always beats `<Q>` (key −32);
+position 2's embedding is e_J + e_J2 and queries read x[J]; every ordinary text
+position carries +e_Y + e_Y2, which every identity unit subtracts, so the whole
+circuit is silent on text; value tokens embed as ±e_A and +e_Z. W_v = W_o = I copies
+the normalised row; three identity units per coordinate compute
+GELU(x[c] − x[Y] − x[Y2]) · (1 + a[c]); the four marker coordinates are printed by
+difference units (x[J] − x[J2] and the like, which ±1 weights can express);
+and the unit counts (3, 5, 4, 3 and the two offset units) are chosen so that, after
+RMSNorm, the offset equals the "value 0" level exactly for every kind of prompt. Each
+rule here was forced by a measured failure of the previous version, and every
+coordinate, including the markers themselves, is printable, which is what makes the
+copy of a copy identical. Installed into a fresh table at scale 1.5 with no training,
+the circuit prints **152,000 of 152,000 weights** and the scale token; the printout
+loaded into an empty model is bit-identical to the printer, and so is its printout,
+for as many generations as we ran.
 
 ## 2. Why self-printing is a capacity problem
 
