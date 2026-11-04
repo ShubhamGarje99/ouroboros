@@ -108,10 +108,56 @@ near-random symbols is a many-epoch problem.
 
 ## 3. Experiments
 
-### 3.1 How close to a fixed point
-### 3.2 The cost in language-model loss
-### 3.3 Generations: copy of a copy of a copy
+All runs: 2,375 rows × 64 = 152,000 ternary weights, 2 layers, 4 heads, context
+128, character-level Shakespeare (1.1 MB, 90/10 split), CPU only (M3, ~11 steps/s).
+
+### 3.1 An exact fixed point, then a language model on top of it
+
+The constructed circuit prints 152,000/152,000 weights with no training. Training
+the language model on top of it, with the circuit's own entries and the reserved
+coordinates of every row held fixed (the free rows are the 65 character
+embeddings, 125 position rows, the second layer and the unused hidden units of the
+first), reaches a validation loss of 2.95 nats/char in 6,000 steps while the
+self-print stays exact at every checkpoint. `verify_tm` then prints the trained
+model, loads the printout into an empty model, and finds it bit-identical,
+scale included; that child's printout is bit-identical too, for the three
+generations we ran. This is the first language model that reproduces its own
+parameters exactly.
+
+The language model is weak (2.95 nats/char; a plain 2-layer model of this size
+reaches about 2.2 to 2.5), because the circuit occupies the first layer and seven
+of the 64 coordinates, and because training at the weight scale the circuit needs
+(1.5) is noisy. Random initialisation of the second layer, kept silent on the
+self-print prompt, was necessary for the language model to train at all: from an
+all-zero second layer, almost no code flips in 2,000 steps.
+
+### 3.2 What training discovers on its own
+
+Trained from random initialisation with the self-printing loss, the same
+architecture finds a partial copy circuit within about 2,000 steps: 78 % of
+weights with ternary codes, 80 % with binary codes, with language-model losses of
+2.50 and 2.18. The error analysis is unambiguous: the learned circuit reads the
+*sign* of a weight (88 % on −1, 91 % on +1) and is at chance on *zero* (27 %).
+A sign is a linear readout of the copied row; zero needs a clean copy and a
+constant offset, which is exactly the part of the hand-built circuit that took the
+most care (unit counts matched to RMSNorm, strictly causal attention). Binary
+weights remove the zero class and still plateau near 80 % because attention at
+the small weight scales training prefers is not sharp (scores scale with the
+square of the weight scale).
+
+### 3.3 Memorising oneself does not work, and cannot
+
+The first version of this project (separate matrices, two-digit row addresses, no
+quote mechanism) never left the marginal rate across ternary and 7-level weights,
+sparsity, soft targets and regeneration, and memorising a frozen snapshot of the
+weights was just as slow. The counting argument in Section 2 says why.
+
 ### 3.4 Reproduction with mutation
+
+Printing with sampling noise turns the printer into a reproduction operator with
+a mutation rate set by the temperature. At τ = 1.5 about 16 % of the weights
+mutate and the children are not viable; the margins on zero-valued weights are
+small, so interesting rates need τ ≲ 0.3. We report this as a demo, not a result.
 
 ## 4. Limitations
 

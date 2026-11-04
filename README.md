@@ -1,6 +1,6 @@
 # Ouroboros: a language model that prints its own weights
 
-**Status (2026-11-05): the exact self-printer exists and is verified; the joint language-model result is being trained. Every number in this README is printed by a script in the repo.**
+**Status (2026-11-05): done for v1. A 152,000-weight character model trained on Shakespeare (val loss 2.95 nats/char) prints all of its own weights exactly; the printout, loaded into an empty model, is bit-identical, and so is its own printout. Every number in this README is printed by a script in the repo.**
 
 Ouroboros is a small character-level GPT with one unusual ability: ask it for
 any row of any of its own weight matrices and it answers with the exact
@@ -82,7 +82,7 @@ bit-identical too, for every generation we ran (3).
 | model | self-print exact | rows exact | child bit-identical | LM val loss |
 |---|---|---|---|---|
 | constructed circuit, no training | 152,000 / 152,000 | 2,375 / 2,375 | yes (3 generations) | untrained |
-| constructed circuit + LM training, circuit entries frozen (tm16) | _(pending)_ | | | _(pending)_ |
+| **constructed circuit + LM training, circuit entries frozen (tm18)** | **152,000 / 152,000** | **2,375 / 2,375** | **yes (3 generations)** | **2.95** |
 | learned from scratch, ternary, scale 0.10 (tm2) | 77.7 % | 0 % | no | 2.50 |
 | learned from scratch, ternary, scale 0.50 (tm9, 6k steps) | 69 % | 0 % | – | 2.42 |
 | learned from scratch, binary ±1, scale 0.15 (tm13) | 79.8 % | 0 % | no | 2.18 |
@@ -103,8 +103,14 @@ rate, and freezing the target did not help (31 % after 2,000 steps). A network's
 weights can hold at most as many bits as they contain, so a model can only print
 itself through a quote mechanism, which here is the embedding lookup.
 
-Figures: `figures/training.png` (self-print accuracy, LM loss and zero fraction
-for the learned runs).
+**4. Reproduction with mutation.** `ouroboros.evolve_tm` prints with sampling
+noise. At τ = 1.5 about 16 % of the weights mutate and the child is not viable
+(LM loss 18+, and it cannot print itself); the margins on zero-valued weights are
+small, so useful mutation rates need τ ≲ 0.3 (see `runs.noindex/*/evolve_tau*.json`).
+
+Figures: `figures/training.png` (self-print accuracy, LM loss and zero fraction;
+the tm18 curve shows the language model learning while self-print stays at 100 %)
+and `figures/generations.png`.
 
 ## Related work
 
