@@ -11,6 +11,13 @@ and apply to any of its weights, instead of a memorisation problem that cannot
 fit (the bits needed to describe the weights equal the bits the weights can
 hold).  The MLP is gated by the attention output so that "coordinate c of the
 copied row" is a near-linear circuit.
+
+Scales.  A row's weights are its codes times one scale.  With n_scale = 1 there is one
+global scale (v1).  With n_scale = 2 the rows of the copy circuit (control, value, coordinate
+and scale tokens, positions 0-2, layer-0 attention and the circuit's hidden units) use scale
+group 0 and every other row uses group 1, so the copier can run at the large scale it needs
+while the language model trains at a small one.  Each scale is printed by its own prompt
+<Q> <SCALE_g> and has its own set of scale tokens.
 """
 from __future__ import annotations
 
@@ -28,6 +35,12 @@ def scale_grid() -> torch.Tensor:
     return 2.0 ** torch.linspace(LOG2_SCALE_MIN, LOG2_SCALE_MAX, N_SCALE_LEVELS)
 
 
+def n_circuit_units(d: int) -> int:
+    """Hidden units of layer 0 used by the hand-installed copy circuit (see circuit.py):
+    3 per printable coordinate + 19 detector/offset units."""
+    return 3 * (d - 4) + 19
+
+
 @dataclass
 class TConfig:
     chars: str
@@ -38,6 +51,7 @@ class TConfig:
     k: int = 1  # ternary
     binary: bool = False  # codes in {-1, +1} only (no zeros)
     strict_causal: bool = False  # positions attend only to earlier positions (position 0 to itself)
+    n_scale: int = 1  # scale groups: 1 = one global scale; 2 = circuit rows / free rows
 
 
 class RMSNorm(nn.Module):
@@ -49,7 +63,7 @@ class TableGPT(nn.Module):
     def __init__(self, cfg: TConfig):
         super().__init__()
         self.cfg = cfg
-        d, L = cfg.d, cfg.n_layer
+        d, L, G = cfg.d, cfg.n_layer, cfg.n_scale
         C = len(cfg.chars)
         # --- row layout (every row is a token) ---------------------------------
         self.slices: dict[str, tuple[int, int]] = {}
@@ -62,9 +76,9 @@ class TableGPT(nn.Module):
 
         add("chars", C)
         add("val", 2 * cfg.k + 1)
-        add("ctl", 3)                 # <Q> <END> <SCALE>
-        add("scale", N_SCALE_LEVELS)  # scale-index tokens
-        add("coord", d)               # one token per coordinate of a row
+        add("ctl", 2 + G)                 # <Q> <END> <SCALE_0> [<SCALE_1>]
+        add("scale", N_SCALE_LEVELS * G)  # scale-index tokens, one set per group
+        add("coord", d)                   # one token per coordinate of a row
         add("pos", cfg.block_size)
         for l in range(L):
             for name, n in (("q", d), ("k", d), ("v", d), ("o", d), ("w1", 4 * d), ("g", 4 * d), ("w2T", 4 * d)):
@@ -72,28 +86,69 @@ class TableGPT(nn.Module):
         self.R = r
         self.C = C
         self.VAL0 = self.slices["val"][0]
-        self.Q, self.END, self.SCALE_ADDR = (self.slices["ctl"][0] + i for i in range(3))
+        self.Q, self.END = self.slices["ctl"][0], self.slices["ctl"][0] + 1
+        self.SCALE_ADDRS = [self.slices["ctl"][0] + 2 + g for g in range(G)]
+        self.SCALE_ADDR = self.SCALE_ADDRS[0]
         self.SCALE0 = self.slices["scale"][0]
         self.COORD0 = self.slices["coord"][0]
         self.POS0 = self.slices["pos"][0]
+        # --- scale groups per row ------------------------------------------------------
+        group = torch.zeros(self.R, dtype=torch.int64)
+        if G == 2:
+            a, n = self.slices["chars"]; group[a:a + n] = 1
+            group[self.POS0 + 3: self.POS0 + cfg.block_size] = 1
+            u = n_circuit_units(d)
+            for name in ("w1", "g", "w2T"):
+                a, n = self.slices[f"L0.{name}"]; group[a + u: a + n] = 1
+            for l in range(1, L):
+                for name in ("q", "k", "v", "o", "w1", "g", "w2T"):
+                    a, n = self.slices[f"L{l}.{name}"]; group[a:a + n] = 1
+        self.register_buffer("row_group", group)
         # --- the table -----------------------------------------------------------
         self.T = nn.Parameter(torch.randn(self.R, d) * 0.02)
-        self.register_buffer("scale_idx", torch.tensor(0, dtype=torch.int64))
+        self.register_buffer("scale_idx", torch.zeros(G, dtype=torch.int64))
         self.register_buffer("grid", scale_grid())
-        self.frozen_scale = False
+        self.frozen = [False] * G
         self.refresh_scale()
         self.norms = nn.ModuleList(RMSNorm() for _ in range(L + 1))
+
+    # --- state-dict compatibility with v1 checkpoints (0-dim scale_idx, no row_group) ----------
+    def load_state_dict(self, sd, strict=True):
+        sd = dict(sd)
+        if sd["scale_idx"].dim() == 0:
+            sd["scale_idx"] = sd["scale_idx"].reshape(1)
+        sd.setdefault("row_group", self.row_group)
+        return super().load_state_dict(sd, strict)
+
+    @property
+    def frozen_scale(self) -> bool:
+        return all(self.frozen)
+
+    @frozen_scale.setter
+    def frozen_scale(self, v: bool):
+        self.frozen = [bool(v)] * self.cfg.n_scale
 
     # --- quantisation --------------------------------------------------------------
     @torch.no_grad()
     def refresh_scale(self):
-        if self.frozen_scale:
-            return
-        target = self.T.abs().mean() / self.cfg.k
-        self.scale_idx.copy_(torch.argmin((self.grid - target).abs()))
+        for g in range(self.cfg.n_scale):
+            if self.frozen[g]:
+                continue
+            rows = self.row_group == g
+            target = self.T[rows].abs().mean() / self.cfg.k
+            self.scale_idx[g] = torch.argmin((self.grid - target).abs())
+
+    def scale_values(self) -> torch.Tensor:
+        """One scale per group."""
+        return self.grid[self.scale_idx]
 
     def scale_value(self):
-        return self.grid[self.scale_idx]
+        """The scale of group 0 (the only scale when n_scale = 1)."""
+        return self.grid[self.scale_idx[0]]
+
+    def row_scale(self) -> torch.Tensor:
+        """(R, 1) scale of every row."""
+        return self.scale_values()[self.row_group][:, None]
 
     def _quant(self, w):
         if self.cfg.binary:
@@ -103,24 +158,26 @@ class TableGPT(nn.Module):
     def effective(self):
         if self.training:
             self.refresh_scale()
-        s = self.scale_value()
+        s = self.row_scale()
         w = self.T / s
         q = self._quant(w)
         return s * (w + (q - w).detach())
 
     @torch.no_grad()
     def codes(self) -> torch.Tensor:
-        return self._quant(self.T / self.scale_value()).to(torch.int64)
+        return self._quant(self.T / self.row_scale()).to(torch.int64)
 
     @torch.no_grad()
-    def load_codes(self, q: torch.Tensor, scale_index: int):
-        self.scale_idx.fill_(scale_index)
-        self.T.copy_(q.to(torch.float32) * self.grid[scale_index])
+    def load_codes(self, q: torch.Tensor, scale_index):
+        """Rebuild the table from printed codes and the printed scale index (one per group)."""
+        idx = torch.as_tensor(scale_index, dtype=torch.int64).reshape(-1).to(self.scale_idx.device)
+        self.scale_idx.copy_(idx)
+        self.T.copy_(q.to(self.T.device, torch.float32) * self.row_scale())
 
     @torch.no_grad()
     def clamp_(self):
-        lim = float(self.scale_value()) * (self.cfg.k + 0.49)
-        self.T.clamp_(-lim, lim)
+        lim = self.row_scale() * (self.cfg.k + 0.49)
+        self.T.copy_(torch.minimum(torch.maximum(self.T, -lim), lim))
 
     def n_params(self):
         return self.R * self.cfg.d
@@ -166,8 +223,12 @@ class TableGPT(nn.Module):
         """Ask for weight (row r, coordinate c)."""
         return [self.Q, r, self.COORD0 + c]
 
-    def scale_prompt(self) -> list[int]:
-        return [self.Q, self.SCALE_ADDR]
+    def scale_prompt(self, g: int = 0) -> list[int]:
+        return [self.Q, self.SCALE_ADDRS[g]]
+
+    def scale_tokens(self, g: int = 0) -> slice:
+        """The scale tokens of group g (what the printer decodes among for <Q> <SCALE_g>)."""
+        return slice(self.SCALE0 + g * N_SCALE_LEVELS, self.SCALE0 + (g + 1) * N_SCALE_LEVELS)
 
     def encode_text(self, s: str) -> list[int]:
         return [self.cfg.chars.index(c) for c in s]

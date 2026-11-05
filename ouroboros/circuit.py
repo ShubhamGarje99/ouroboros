@@ -14,9 +14,10 @@ output, so three identity units per coordinate compute GELU(x[c] - x[Y] - x[Y2])
 which is zero unless c is the asked coordinate; unit counts for the detectors and the offset
 units are chosen so that, after RMSNorm, the offset equals the "value 0" level exactly.
 
-The scale is printed by construction too: <SCALE> = e_Z and the one correct scale token is
-e_Z, every other scale row is zero, so the answer position keeps x[Z] = 1 > 0 = every wrong
-scale logit.
+The scale is printed by construction too: <SCALE_0> = e_Z and the one correct scale token of
+group 0 is e_Z, every other scale row is zero, so the answer position keeps x[Z] = 1 > 0 = every
+wrong scale logit.  With two scale groups, <SCALE_1> = e_A and the correct group-1 token is e_A
+(the identity unit for A only adds a positive amount to x[A] there).
 
 Everything outside the circuit is free for the language model: the character and position
 rows, the unused hidden units of layer 0, and every later layer.  None of it can disturb a
@@ -29,20 +30,18 @@ from __future__ import annotations
 
 import torch
 
-from .tm import TableGPT
-
-
-def n_circuit_units(d: int) -> int:
-    """Hidden units of layer 0 used by the circuit: 3 per printable coordinate + 19 detector/offset units."""
-    return 3 * (d - 4) + 19
+from .tm import N_SCALE_LEVELS, TableGPT, n_circuit_units
 
 
 @torch.no_grad()
-def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5, free_density: float = 0.5):
+def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5, free_density: float = 0.5,
+                         free_scale: float | None = None):
     """Install the copy circuit in layer 0 of a fresh table; random ternary everywhere that is free.
 
-    `free_density` is the fraction of non-zero codes in the free rows of layer >= 1 and the free
-    hidden units of layer 0.  Needs strictly causal attention."""
+    `scale` is the circuit's weight scale (the only scale when the model has one scale group);
+    `free_scale` is the scale of the free rows when the model has two groups.  `free_density` is the
+    fraction of non-zero codes in the free rows of layer >= 1 and the free hidden units of layer 0.
+    Needs strictly causal attention."""
     assert model.cfg.strict_causal, "the construction needs strictly causal attention (no self-attention)"
     assert not model.cfg.binary and model.cfg.k == 1, "the construction is for ternary codes"
     d, H = model.cfg.d, model.cfg.n_head
@@ -69,7 +68,9 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5, fre
     q0 = s["ctl"][0]
     codes[q0 + 0, Q0] = 1         # <Q>
     codes[q0 + 1, 0] = 1          # <END>
-    codes[q0 + 2, Z] = 1          # <SCALE> = e_Z, read only from a reserved coordinate
+    codes[q0 + 2, Z] = 1          # <SCALE_0> = e_Z, read only from a reserved coordinate
+    if model.cfg.n_scale == 2:
+        codes[q0 + 3, A] = 1      # <SCALE_1> = e_A
     v0 = model.VAL0
     codes[v0 + 0, A] = -1
     codes[v0 + 1, Z] = 1
@@ -143,9 +144,13 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5, fre
             if name == "o":
                 blk[[A, Z]] = 0
             codes[r] = blk
-    idx = int(torch.argmin((model.grid - scale).abs()))
+    idx = [int(torch.argmin((model.grid - scale).abs()))]
     codes[rows("scale")] = 0
-    codes[model.SCALE0 + idx, Z] = 1
+    codes[model.SCALE0 + idx[0], Z] = 1
+    if model.cfg.n_scale == 2:
+        assert free_scale is not None, "two scale groups need free_scale"
+        idx.append(int(torch.argmin((model.grid - free_scale).abs())))
+        codes[model.SCALE0 + N_SCALE_LEVELS + idx[1], A] = 1
     model.load_codes(codes, idx)
     model.frozen_scale = True
     return model

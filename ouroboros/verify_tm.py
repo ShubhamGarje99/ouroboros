@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from .data import load_text
-from .tm import N_SCALE_LEVELS, TableGPT, TConfig
+from .tm import TableGPT, TConfig
 from .train_tm import eval_lm
 
 
@@ -59,12 +59,16 @@ def self_print(model: TableGPT, batch=4096, tau=0.0, gen=None, margins: dict | N
             lt = vt.gather(1, t[:, None])[:, 0]
             wrong = vt.scatter(1, t[:, None], float("-inf")).max(-1).values
             min_margin = min(min_margin, float(((lt - wrong) / vt.abs().max(-1).values.clamp_min(1e-30)).min()))
-    s_logits = model(torch.tensor([model.scale_prompt()], device=dev), last=True)[0, model.SCALE0: model.SCALE0 + N_SCALE_LEVELS]
+    s_idx, s_margin = [], float("inf")
+    for g in range(model.cfg.n_scale):
+        s_logits = model(torch.tensor([model.scale_prompt(g)], device=dev), head=model.scale_tokens(g), last=True)[0]
+        s_idx.append(int(s_logits.argmax()))
+        t = int(model.scale_idx[g])
+        s_margin = min(s_margin, float((s_logits[t] - torch.cat([s_logits[:t], s_logits[t + 1:]]).max()) / s_logits.abs().max().clamp_min(1e-30)))
     if margins is not None:
         margins["value"] = min_margin
-        t = int(model.scale_idx)
-        margins["scale"] = float((s_logits[t] - torch.cat([s_logits[:t], s_logits[t + 1:]]).max()) / s_logits.abs().max().clamp_min(1e-30))
-    return out.view(model.R, d), int(s_logits.argmax()), bad
+        margins["scale"] = s_margin
+    return out.view(model.R, d), s_idx, bad
 
 
 @torch.no_grad()
@@ -93,10 +97,10 @@ def main():
     val_ids = torch.tensor(model.encode_text(val_text))
     seq = ck["args"]["seq"]
     results = {"params": model.n_params(), "rows": model.R, "d": model.cfg.d, "n_layer": model.cfg.n_layer,
-               "scale": float(model.scale_value()), "generations": []}
+               "scales": [float(v) for v in model.scale_values()], "generations": []}
     parent = model
     print(f"parent: {model.R} rows x {model.cfg.d} = {model.n_params():,} params, {model.cfg.n_layer} layers, "
-          f"scale {float(model.scale_value()):.3f}; lm_val {eval_lm(model, val_ids, seq, 32, args.eval_n):.4f}", flush=True)
+          f"scales {[round(float(v), 4) for v in model.scale_values()]}; lm_val {eval_lm(model, val_ids, seq, 32, args.eval_n):.4f}", flush=True)
     print("--- parent sample ---\n" + sample_text(model) + "\n---------------------", flush=True)
     for g in range(1, args.generations + 1):
         t0 = time.time()
@@ -111,10 +115,10 @@ def main():
         child.frozen_scale = True  # a rebuilt model never re-estimates its scale
         child.to(args.device)
         child.eval()
-        same = bool(torch.equal(printed, true)) and s_idx == int(parent.scale_idx)
+        same = bool(torch.equal(printed, true)) and s_idx == parent.scale_idx.tolist()
         child_loss = eval_lm(child, val_ids, seq, 32, args.eval_n)
         rec = {"generation": g, "exact_weights": exact, "n_exact": n_exact, "n_weights": printed.numel(),
-               "rows_exact": rows_exact, "scale_ok": s_idx == int(parent.scale_idx),
+               "rows_exact": rows_exact, "scale_ok": s_idx == parent.scale_idx.tolist(),
                "bit_identical": same, "child_lm_val": child_loss, "bad_tokens": bad,
                "min_rel_margin_value": margins["value"], "rel_margin_scale": margins["scale"], "seconds": time.time() - t0}
         results["generations"].append(rec)

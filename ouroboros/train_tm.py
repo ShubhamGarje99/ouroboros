@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from .data import load_text
-from .tm import N_SCALE_LEVELS, TableGPT, TConfig
+from .tm import TableGPT, TConfig
 
 
 def text_batch(ids, seq, batch, gen, device=None):
@@ -30,16 +30,28 @@ def quine_batch(model: TableGPT, rows: torch.Tensor, cols: torch.Tensor):
     return x, y
 
 
-def scale_batch(model: TableGPT):
-    """<Q> <SCALE> -> the scale token; the loss is over the scale tokens only (what the printer decodes among)."""
-    x = torch.tensor([model.scale_prompt()], device=model.T.device)
-    y = torch.tensor([int(model.scale_idx)], device=model.T.device)
+def scale_batch(model: TableGPT, g: int = 0):
+    """<Q> <SCALE_g> -> the scale token of group g; the loss is over that group's scale tokens only
+    (what the printer decodes among)."""
+    x = torch.tensor([model.scale_prompt(g)], device=model.T.device)
+    y = torch.tensor([int(model.scale_idx[g])], device=model.T.device)
     return x, y
 
 
 def scale_loss(model: TableGPT):
-    x, y = scale_batch(model)
-    return F.cross_entropy(model(x, head=slice(model.SCALE0, model.SCALE0 + N_SCALE_LEVELS), last=True), y)
+    tot = 0.0
+    for g in range(model.cfg.n_scale):
+        x, y = scale_batch(model, g)
+        tot = tot + F.cross_entropy(model(x, head=model.scale_tokens(g), last=True), y)
+    return tot
+
+
+def scale_ok(model: TableGPT) -> bool:
+    for g in range(model.cfg.n_scale):
+        x, y = scale_batch(model, g)
+        if int(model(x, head=model.scale_tokens(g), last=True).argmax(-1)) != int(y):
+            return False
+    return True
 
 
 @torch.no_grad()
@@ -73,8 +85,7 @@ def eval_quine(model, n=4096, gen=None):
     x, y = quine_batch(model, rows, cols)
     pred = model(x, head=slice(v0, v1), last=True).argmax(-1) + v0
     out["row_exact"] = float((pred == y[:, 0]).view(32, -1).all(1).float().mean())
-    x, y = scale_batch(model)
-    out["scale_ok"] = bool((model(x, head=slice(model.SCALE0, model.SCALE0 + N_SCALE_LEVELS), last=True).argmax(-1) == y).all())
+    out["scale_ok"] = scale_ok(model)
     model.train()
     return out
 
@@ -106,7 +117,9 @@ def main():
     p.add_argument("--protect", type=float, default=1.0, help="multiply updates to the circuit rows by this factor (<1 protects the hand-installed circuit)")
     p.add_argument("--binary", action="store_true", help="binary codes (+1/-1), no zeros")
     p.add_argument("--strict_causal", action="store_true", help="no self-attention (needed by the constructed circuit)")
-    p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule; with --init_circuit 0 = 1.5)")
+    p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule; with --init_circuit 0 = 1.0)")
+    p.add_argument("--n_scale", type=int, default=1, help="2 = separate scales for the circuit rows and the free rows")
+    p.add_argument("--free_scale", type=float, default=0.0, help="with --n_scale 2: pin the free rows' scale (0 = BitNet rule on the free rows)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -116,11 +129,14 @@ def main():
 
     train_text, val_text, chars = load_text(args.data)
     cfg = TConfig(chars=chars, d=args.d, n_layer=args.n_layer, n_head=args.n_head, block_size=args.block, binary=args.binary,
-                  strict_causal=args.strict_causal or args.init_circuit)
+                  strict_causal=args.strict_causal or args.init_circuit, n_scale=args.n_scale)
     model = TableGPT(cfg)
     if args.init_circuit:
         from .circuit import install_copy_circuit
-        install_copy_circuit(model, scale=args.scale or 1.5, free_density=args.free_density)
+        install_copy_circuit(model, scale=args.scale or 1.0, free_density=args.free_density,
+                             free_scale=(args.free_scale or 0.15) if args.n_scale == 2 else None)
+        if args.n_scale == 2 and args.free_scale == 0:
+            model.frozen[1] = False  # the free rows' scale follows the BitNet rule
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(ck["model"])
@@ -133,6 +149,8 @@ def main():
             model.T.mul_(float(model.scale_value()) / old)
         model.frozen_scale = True
         print(f"scale pinned at {float(model.scale_value()):.3f} (was {old:.3f})", flush=True)
+    if args.resume:
+        model.frozen = list(ck.get("frozen", [model.frozen_scale] * model.cfg.n_scale))
     model.to(args.device)
     train_ids = torch.tensor(model.encode_text(train_text))
     val_ids = torch.tensor(model.encode_text(val_text))
@@ -184,11 +202,12 @@ def main():
             codes = model.codes()
             rec = {"step": step, "lm_train": lm_loss.item(), "lm_val": eval_lm(model, val_ids, args.seq, args.batch, args.eval_n),
                    **eval_quine(model, gen=gen), "frac_zero": float((codes == 0).float().mean()),
-                   "scale_idx": int(model.scale_idx), "t": time.time() - t0}
+                   "scale_idx": model.scale_idx.tolist(), "scales": [round(float(v), 4) for v in model.scale_values()],
+                   "t": time.time() - t0}
             log.append(rec)
             print("EVAL " + json.dumps(rec), flush=True)
             state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-            torch.save({"model": state, "cfg": cfg.__dict__, "args": vars(args), "frozen_scale": model.frozen_scale},
+            torch.save({"model": state, "cfg": cfg.__dict__, "args": vars(args), "frozen_scale": model.frozen_scale, "frozen": model.frozen},
                        os.path.join(args.out, "ckpt.pt"))
             json.dump(log, open(os.path.join(args.out, "log.json"), "w"), indent=1)
 
