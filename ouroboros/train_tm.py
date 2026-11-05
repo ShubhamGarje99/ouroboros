@@ -10,16 +10,20 @@ import torch
 import torch.nn.functional as F
 
 from .data import load_text
-from .tm import TableGPT, TConfig
+from .tm import N_SCALE_LEVELS, TableGPT, TConfig
 
 
-def text_batch(ids, seq, batch, gen):
+def text_batch(ids, seq, batch, gen, device=None):
     ix = torch.randint(0, len(ids) - seq - 1, (batch,), generator=gen)
-    return torch.stack([ids[i:i + seq] for i in ix]), torch.stack([ids[i + 1:i + 1 + seq] for i in ix])
+    x = torch.stack([ids[i:i + seq] for i in ix])
+    y = torch.stack([ids[i + 1:i + 1 + seq] for i in ix])
+    return x.to(device), y.to(device)
 
 
 def quine_batch(model: TableGPT, rows: torch.Tensor, cols: torch.Tensor):
     """<Q> <row r> <col c>  ->  value token at the last position."""
+    dev = model.T.device
+    rows, cols = rows.to(dev), cols.to(dev)
     q = model.codes()[rows, cols]
     x = torch.stack([torch.full_like(rows, model.Q), rows, model.COORD0 + cols], dim=1)
     y = (q + model.VAL0 + model.cfg.k)[:, None]
@@ -27,15 +31,15 @@ def quine_batch(model: TableGPT, rows: torch.Tensor, cols: torch.Tensor):
 
 
 def scale_batch(model: TableGPT):
-    seq = torch.tensor([[model.Q, model.SCALE_ADDR, model.SCALE0 + int(model.scale_idx), model.END]])
-    x, y = seq[:, :-1], seq[:, 1:]
-    mask = torch.tensor([[False, True, True]])
-    return x, y, mask
+    """<Q> <SCALE> -> the scale token; the loss is over the scale tokens only (what the printer decodes among)."""
+    x = torch.tensor([model.scale_prompt()], device=model.T.device)
+    y = torch.tensor([int(model.scale_idx)], device=model.T.device)
+    return x, y
 
 
-def masked_ce(logits, y, mask):
-    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), reduction="none")
-    return loss.view_as(y)[mask].mean()
+def scale_loss(model: TableGPT):
+    x, y = scale_batch(model)
+    return F.cross_entropy(model(x, head=slice(model.SCALE0, model.SCALE0 + N_SCALE_LEVELS), last=True), y)
 
 
 @torch.no_grad()
@@ -45,8 +49,8 @@ def eval_lm(model, ids, seq, batch, n=8):
     g = torch.Generator().manual_seed(1)
     tot = 0.0
     for _ in range(n):
-        x, y = text_batch(ids, seq, batch, g)
-        tot += F.cross_entropy(model(x)[..., : model.C].reshape(-1, model.C), y.reshape(-1)).item()
+        x, y = text_batch(ids, seq, batch, g, model.T.device)
+        tot += F.cross_entropy(model(x, head=slice(0, model.C)).reshape(-1, model.C), y.reshape(-1)).item()
     model.train(was)
     return tot / n
 
@@ -54,21 +58,23 @@ def eval_lm(model, ids, seq, batch, n=8):
 @torch.no_grad()
 def eval_quine(model, n=4096, gen=None):
     """Accuracy of the value answer (argmax restricted to value tokens) on random (row, col) pairs,
-    plus the fraction of whole rows that are exactly right on a sample of 32 rows."""
+    plus the fraction of whole rows that are exactly right on a sample of 32 rows, and whether the
+    scale token is right (argmax restricted to scale tokens)."""
     model.eval()
+    d = model.cfg.d
     rows = torch.randint(0, model.R, (n,), generator=gen)
-    cols = torch.randint(0, model.cfg.d, (n,), generator=gen)
+    cols = torch.randint(0, d, (n,), generator=gen)
     x, y = quine_batch(model, rows, cols)
     v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
-    pred = model(x)[:, -1, v0:v1].argmax(-1) + v0
+    pred = model(x, head=slice(v0, v1), last=True).argmax(-1) + v0
     out = {"val_acc": float((pred == y[:, 0]).float().mean())}
-    rows = torch.randint(0, model.R, (32,), generator=gen).repeat_interleave(model.cfg.d)
-    cols = torch.arange(model.cfg.d).repeat(32)
+    rows = torch.randint(0, model.R, (32,), generator=gen).repeat_interleave(d)
+    cols = torch.arange(d).repeat(32)
     x, y = quine_batch(model, rows, cols)
-    pred = model(x)[:, -1, v0:v1].argmax(-1) + v0
+    pred = model(x, head=slice(v0, v1), last=True).argmax(-1) + v0
     out["row_exact"] = float((pred == y[:, 0]).view(32, -1).all(1).float().mean())
-    x, y, mask = scale_batch(model)
-    out["scale_ok"] = bool(((model(x).argmax(-1) == y) | ~mask).all())
+    x, y = scale_batch(model)
+    out["scale_ok"] = bool((model(x, head=slice(model.SCALE0, model.SCALE0 + N_SCALE_LEVELS), last=True).argmax(-1) == y).all())
     model.train()
     return out
 
@@ -90,14 +96,17 @@ def main():
     p.add_argument("--lam_start", type=int, default=0)
     p.add_argument("--warmup", type=int, default=200)
     p.add_argument("--eval_every", type=int, default=250)
+    p.add_argument("--eval_n", type=int, default=8, help="validation batches per eval")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--resume", default=None)
     p.add_argument("--init_circuit", action="store_true", help="start from the hand-installed copy circuit (frozen scale)")
+    p.add_argument("--free_density", type=float, default=0.5, help="non-zero fraction at init in the free rows of the circuit model")
     p.add_argument("--protect", type=float, default=1.0, help="multiply updates to the circuit rows by this factor (<1 protects the hand-installed circuit)")
     p.add_argument("--binary", action="store_true", help="binary codes (+1/-1), no zeros")
     p.add_argument("--strict_causal", action="store_true", help="no self-attention (needed by the constructed circuit)")
-    p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule)")
+    p.add_argument("--scale", type=float, default=0.0, help="pin and freeze the global scale at this value (0 = BitNet rule; with --init_circuit 0 = 1.5)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -111,9 +120,9 @@ def main():
     model = TableGPT(cfg)
     if args.init_circuit:
         from .circuit import install_copy_circuit
-        install_copy_circuit(model)
+        install_copy_circuit(model, scale=args.scale or 1.5, free_density=args.free_density)
     if args.resume:
-        ck = torch.load(args.resume)
+        ck = torch.load(args.resume, map_location="cpu")
         model.load_state_dict(ck["model"])
         model.frozen_scale = bool(ck.get("frozen_scale", False))
     if args.scale > 0 and not args.init_circuit:
@@ -124,9 +133,10 @@ def main():
             model.T.mul_(float(model.scale_value()) / old)
         model.frozen_scale = True
         print(f"scale pinned at {float(model.scale_value()):.3f} (was {old:.3f})", flush=True)
+    model.to(args.device)
     train_ids = torch.tensor(model.encode_text(train_text))
     val_ids = torch.tensor(model.encode_text(val_text))
-    print(f"rows/tokens={model.R} params={model.n_params():,}", flush=True)
+    print(f"rows/tokens={model.R} params={model.n_params():,} device={args.device}", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0, betas=(0.9, 0.95))
 
@@ -139,25 +149,25 @@ def main():
     protected = None
     if args.protect < 1.0:
         from .circuit import circuit_mask
-        protected = circuit_mask(model)
+        protected = circuit_mask(model).to(args.device)
+        print(f"protected entries: {int(protected.sum()):,} of {model.n_params():,}", flush=True)
+    v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
     log, t0 = [], time.time()
     for step in range(1, args.steps + 1):
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         lam = args.lam if step >= args.lam_start else 0.0
-        x, y = text_batch(train_ids, args.seq, args.batch, gen)
-        logits = model(x)[..., : model.C]  # text positions only ever predict characters
+        x, y = text_batch(train_ids, args.seq, args.batch, gen, args.device)
+        logits = model(x, head=slice(0, model.C))  # text positions only ever predict characters
         lm_loss = F.cross_entropy(logits.reshape(-1, model.C), y.reshape(-1))
         rows = torch.randint(0, model.R, (args.qbatch,), generator=gen)
         cols = torch.randint(0, model.cfg.d, (args.qbatch,), generator=gen)
         qx, qy = quine_batch(model, rows, cols)
-        v0, v1 = model.VAL0, model.VAL0 + 2 * model.cfg.k + 1
         # the answer is one of the value tokens, so the loss is over those tokens only (as the printer decodes)
-        q_loss = F.cross_entropy(model(qx)[:, -1, v0:v1], qy[:, 0] - v0)
+        q_loss = F.cross_entropy(model(qx, head=slice(v0, v1), last=True), qy[:, 0] - v0)
         loss = lm_loss + lam * q_loss
         if step % 10 == 0:
-            sx, sy, sm = scale_batch(model)
-            loss = loss + lam * masked_ce(model(sx), sy, sm)
+            loss = loss + lam * scale_loss(model)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -172,12 +182,13 @@ def main():
             print(f"step {step} lm {lm_loss.item():.3f} quine {q_loss.item():.3f} lam {lam:.1f} lr {lr_at(step):.1e} {time.time() - t0:.0f}s", flush=True)
         if step % args.eval_every == 0 or step == args.steps:
             codes = model.codes()
-            rec = {"step": step, "lm_train": lm_loss.item(), "lm_val": eval_lm(model, val_ids, args.seq, args.batch),
+            rec = {"step": step, "lm_train": lm_loss.item(), "lm_val": eval_lm(model, val_ids, args.seq, args.batch, args.eval_n),
                    **eval_quine(model, gen=gen), "frac_zero": float((codes == 0).float().mean()),
                    "scale_idx": int(model.scale_idx), "t": time.time() - t0}
             log.append(rec)
             print("EVAL " + json.dumps(rec), flush=True)
-            torch.save({"model": model.state_dict(), "cfg": cfg.__dict__, "args": vars(args), "frozen_scale": model.frozen_scale},
+            state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            torch.save({"model": state, "cfg": cfg.__dict__, "args": vars(args), "frozen_scale": model.frozen_scale},
                        os.path.join(args.out, "ckpt.pt"))
             json.dump(log, open(os.path.join(args.out, "log.json"), "w"), indent=1)
 

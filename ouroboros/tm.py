@@ -126,7 +126,8 @@ class TableGPT(nn.Module):
         return self.R * self.cfg.d
 
     # --- forward -----------------------------------------------------------------------
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def forward(self, idx: torch.Tensor, head: slice | None = None, last: bool = False) -> torch.Tensor:
+        """Logits over all R tokens (or the row slice `head`); with `last`, only for the final position."""
         B, Tn = idx.shape
         assert Tn <= self.cfg.block_size
         E = self.effective()
@@ -140,7 +141,7 @@ class TableGPT(nn.Module):
             k = (h @ sl("k").T).view(B, Tn, H, -1).transpose(1, 2)
             v = (h @ sl("v").T).view(B, Tn, H, -1).transpose(1, 2)
             if self.cfg.strict_causal:
-                mask = torch.ones(Tn, Tn, dtype=torch.bool).tril(-1)
+                mask = torch.ones(Tn, Tn, dtype=torch.bool, device=idx.device).tril(-1)
                 mask[0, 0] = True
                 a = F.scaled_dot_product_attention(q, k, v, attn_mask=mask).transpose(1, 2).reshape(B, Tn, d)
             else:
@@ -151,7 +152,11 @@ class TableGPT(nn.Module):
             hid = F.gelu(h @ sl("w1").T) * (1.0 + a @ sl("g").T)
             x = x + a + hid @ sl("w2T")  # w2 = w2T^T, so hid @ w2^T = hid @ w2T
         x = self.norms[ni](x)
-        return x @ E.T  # tied head over all R tokens
+        if last:
+            x = x[:, -1]
+        if head is not None:
+            E = E[head]
+        return x @ E.T  # tied head over all R tokens (or the requested slice of them)
 
     # --- printing helpers -----------------------------------------------------------
     def val_tok(self, q: int) -> int:

@@ -1,0 +1,14 @@
+{
+  "id": "shubhamvijaygarje/ouroboros-v2",
+  "title": "Ouroboros v2",
+  "code_file": "run.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": ["shubhamvijaygarje/ouroboros-code"],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

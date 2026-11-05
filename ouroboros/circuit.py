@@ -1,17 +1,29 @@
 """Hand-installed copy circuit for TableGPT (layer 0), as a constructive proof.
 
-Prompt: <Q> <row r> <col c>.  Reserved coordinates of the d-dim stream:
-  M  (=d-1): attention marker.  pos1 = +e_M, pos2 = -e_M.  Every head's query reads -x[M]
-             and every head's key reads +x[M], so position 2 attends to position 1
-             (score ~ +3) and not to itself (score ~ -8).
-  K  (=d-2): constant marker. pos2 also carries +e_K; two gate-free hidden units read it
-             and feed the "0" logit coordinate.
-  A, Z (=d-3, d-4): readout coordinates.  Value token embeddings are +e_A (+1), -e_A (-1), +e_Z (0).
+Prompt <Q> <row r> <col c>.  Seven coordinates of the d-dimensional stream are reserved
+(every one of them printable):
+  Q0     : <Q> = e_Q0.  Every head's keys read -x[Q0] in four dimensions, so at the answer
+           position the row (key ~ 0) always beats <Q> (key ~ -sqrt(d) * 4).
+  J, J2  : position 2 = e_J + e_J2; every head's queries read x[J].  Detector units
+           x[J] - x[J2] and x[J2] - x[J] print J and J2 themselves.
+  Y, Y2  : text marker, +1 in every position row >= 3 and absent from the prompt positions.
+           Every circuit unit subtracts x[Y] + x[Y2], so the circuit is silent on ordinary text.
+  A, Z   : readout.  value +1 -> +e_A, -1 -> -e_A, 0 -> +e_Z.
 Heads copy the attended row (W_v = W_o = I); the MLP gate is the identity on the attention
-output, so hidden unit c = GELU(x2[c]) * (1 + a[c]) is zero unless c is the asked coordinate,
-where it is one of three levels depending on T[r][c].  W2 sends it to coordinate A with an
-offset so the levels are about -11, 0, +11, and sends a constant ~9 to coordinate Z.
-Layer 1 is zeroed (identity map).  Coordinates M and K cannot be printed by the circuit.
+output, so three identity units per coordinate compute GELU(x[c] - x[Y] - x[Y2]) * (1 + a[c]),
+which is zero unless c is the asked coordinate; unit counts for the detectors and the offset
+units are chosen so that, after RMSNorm, the offset equals the "value 0" level exactly.
+
+The scale is printed by construction too: <SCALE> = e_Z and the one correct scale token is
+e_Z, every other scale row is zero, so the answer position keeps x[Z] = 1 > 0 = every wrong
+scale logit.
+
+Everything outside the circuit is free for the language model: the character and position
+rows, the unused hidden units of layer 0, and every later layer.  None of it can disturb a
+printed answer, because the value and scale tokens are read only from the reserved
+coordinates A and Z, and no free row may write there (W_o rows A, Z and the A, Z columns of
+every W_2 are held at zero by `circuit_mask`).  Later layers are also initialised silent on
+the prompt (their MLP units subtract the markers J, J2 that only position 2 carries).
 """
 from __future__ import annotations
 
@@ -20,21 +32,22 @@ import torch
 from .tm import TableGPT
 
 
-@torch.no_grad()
-def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
-    """Install the copy circuit in layer 0 (layer 1 is zero = identity). Needs strictly causal attention.
+def n_circuit_units(d: int) -> int:
+    """Hidden units of layer 0 used by the circuit: 3 per printable coordinate + 19 detector/offset units."""
+    return 3 * (d - 4) + 19
 
-    Prompt <Q> <row r> <col c>.  Reserved coordinates (every one of them printable):
-      Q0 : <Q> = e_Q0; keys read -x[Q0] in four dims, so at position 2 the row (key ~0) beats <Q> (key -32).
-      J, J2 : pos2 = e_J + e_J2; queries read x[J].  Detector units x[J]-x[J2] / x[J2]-x[J] print J and J2.
-      Y, Y2 : text marker, +1 in every position row >= 3 and absent from prompt positions. Every circuit
-              unit subtracts x[Y] + x[Y2], so the whole circuit is silent on ordinary text.
-      A, Z  : readout. value +1 -> +e_A, -1 -> -e_A, 0 -> +e_Z.
-    Identity units (x3 for gain) compute GELU(x[c] - x[Y] - x[Y2]) * (1 + a[c]); unit counts for the
-    detectors and offsets are chosen so that after RMSNorm the offset equals the "value 0" level exactly."""
+
+@torch.no_grad()
+def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5, free_density: float = 0.5):
+    """Install the copy circuit in layer 0 of a fresh table; random ternary everywhere that is free.
+
+    `free_density` is the fraction of non-zero codes in the free rows of layer >= 1 and the free
+    hidden units of layer 0.  Needs strictly causal attention."""
     assert model.cfg.strict_causal, "the construction needs strictly causal attention (no self-attention)"
+    assert not model.cfg.binary and model.cfg.k == 1, "the construction is for ternary codes"
     d, H = model.cfg.d, model.cfg.n_head
     hd = d // H
+    assert hd >= 4, "each head needs at least 4 dimensions for the marker keys"
     Q0, J, J2, Y, Y2, A, Z = d - 1, d - 2, d - 3, d - 4, d - 5, d - 6, d - 7
     reserved = [Q0, J, J2, Y, Y2, A, Z]
     s = model.slices
@@ -46,17 +59,17 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
         a, n = s[name]
         return slice(a, a + n)
 
-    for name in ("chars", "scale"):
-        r = rows(name)
-        blk = torch.randint(-1, 2, (r.stop - r.start, d), generator=g)
-        blk[torch.rand(blk.shape, generator=g) < 0.6] = 0
+    def random_block(n, density):
+        blk = torch.randint(-1, 2, (n, d), generator=g)
+        blk[torch.rand(blk.shape, generator=g) >= density] = 0
         blk[:, reserved] = 0
-        codes[r] = blk
+        return blk
+
+    codes[rows("chars")] = random_block(s["chars"][1], 0.4)
     q0 = s["ctl"][0]
     codes[q0 + 0, Q0] = 1         # <Q>
     codes[q0 + 1, 0] = 1          # <END>
-    codes[q0 + 2, 1] = 1          # <SCALE> = e_1
-    codes[rows("scale"), 1] = 0   # only the correct scale token will carry e_1
+    codes[q0 + 2, Z] = 1          # <SCALE> = e_Z, read only from a reserved coordinate
     v0 = model.VAL0
     codes[v0 + 0, A] = -1
     codes[v0 + 1, Z] = 1
@@ -67,9 +80,7 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     p0 = model.POS0
     codes[p0 + 2, J] = 1
     codes[p0 + 2, J2] = 1
-    pr = torch.randint(-1, 2, (model.cfg.block_size - 3, d), generator=g)
-    pr[torch.rand(pr.shape, generator=g) < 0.7] = 0
-    pr[:, reserved] = 0
+    pr = random_block(model.cfg.block_size - 3, 0.3)
     pr[:, [Y, Y2]] = 1            # text marker on every ordinary position
     codes[p0 + 3: p0 + model.cfg.block_size] = pr
     Wq, Wk, Wv, Wo = (codes[rows(f"L0.{n}")] for n in ("q", "k", "v", "o"))
@@ -109,17 +120,23 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
     for _ in range(2):
         unit({J: 1}, None, A, -1)          # offset
     unit({J2: 1}, None, A, -1)             # offset
-    unit({J: 1, J2: 1}, None, Z)           # "0" logit >= 9.24 > any residual leak
-    assert u <= 4 * d
-    # layer 1: random ternary so the language model has a network to train from step 0, but silent on
-    # the self-print prompt: its MLP units subtract the query markers (present only at position 2), it never
-    # writes the readout coordinates (W_o rows A, Z and all reserved coordinates are zero).
+    unit({J: 1, J2: 1}, None, Z)           # "0" logit: 2*sqrt(d/3) after the norm, above any residual leak
+    assert u == n_circuit_units(d) <= 4 * d
+    # the remaining hidden units of layer 0 are free: random, silent on the prompt, never writing A or Z
+    nfree = 4 * d - u
+    for name, blk in (("w1", W1), ("g", G), ("w2T", W2T)):
+        b = random_block(nfree, free_density)
+        if name == "w1":
+            b[:, J] = -1
+            b[:, J2] = -1
+        blk[u:] = b
+    # later layers: random ternary so the language model has a network to train from step 0, but silent on
+    # the self-print prompt: their MLP units subtract the query markers (present only at position 2), and they
+    # never write the readout coordinates (W_o rows A, Z and every reserved column are zero).
     for l in range(1, model.cfg.n_layer):
         for name in ("q", "k", "v", "o", "w1", "g", "w2T"):
             r = rows(f"L{l}.{name}")
-            blk = torch.randint(-1, 2, (r.stop - r.start, d), generator=g)
-            blk[torch.rand(blk.shape, generator=g) < 0.5] = 0
-            blk[:, reserved] = 0
+            blk = random_block(r.stop - r.start, free_density)
             if name == "w1":
                 blk[:, J] = -1
                 blk[:, J2] = -1
@@ -127,8 +144,8 @@ def install_copy_circuit(model: TableGPT, seed: int = 0, scale: float = 1.5):
                 blk[[A, Z]] = 0
             codes[r] = blk
     idx = int(torch.argmin((model.grid - scale).abs()))
-    codes[model.SCALE0 + idx] = 0
-    codes[model.SCALE0 + idx, 1] = 1
+    codes[rows("scale")] = 0
+    codes[model.SCALE0 + idx, Z] = 1
     model.load_codes(codes, idx)
     model.frozen_scale = True
     return model
@@ -139,9 +156,13 @@ def circuit_mask(model: TableGPT) -> torch.Tensor:
     circuit's own rows, and the reserved coordinates of every row."""
     d = model.cfg.d
     m = torch.zeros(model.R, d, dtype=torch.bool)
-    for name in ("ctl", "scale", "val", "coord", "L0.q", "L0.k", "L0.v", "L0.o", "L0.w1", "L0.g", "L0.w2T"):
+    for name in ("ctl", "scale", "val", "coord", "L0.q", "L0.k", "L0.v", "L0.o"):
         a, n = model.slices[name]
         m[a:a + n] = True
+    u = n_circuit_units(d)
+    for name in ("L0.w1", "L0.g", "L0.w2T"):
+        a, _ = model.slices[name]
+        m[a:a + u] = True
     m[model.POS0: model.POS0 + 3] = True
     m[:, d - 7:] = True
     for l in range(1, model.cfg.n_layer):
@@ -154,7 +175,11 @@ def circuit_rows(model: TableGPT) -> torch.Tensor:
     """Indices of the rows the hand-installed circuit depends on (for damped updates)."""
     s = model.slices
     idx = [model.Q, model.POS0 + 1, model.POS0 + 2]
-    for name in ("ctl", "scale", "val", "coord", "L0.q", "L0.k", "L0.v", "L0.o", "L0.w1", "L0.g", "L0.w2T"):
+    for name in ("ctl", "scale", "val", "coord", "L0.q", "L0.k", "L0.v", "L0.o"):
         a, n = s[name]
         idx += list(range(a, a + n))
+    u = n_circuit_units(model.cfg.d)
+    for name in ("L0.w1", "L0.g", "L0.w2T"):
+        a, _ = s[name]
+        idx += list(range(a, a + u))
     return torch.tensor(sorted(set(idx)))

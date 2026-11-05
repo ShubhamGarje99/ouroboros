@@ -3,3 +3,4 @@ data.noindex/
 runs.noindex/
 __pycache__/
 *.pt
+kaggle/*.noindex/
