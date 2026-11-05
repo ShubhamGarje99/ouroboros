@@ -4,21 +4,22 @@
 
 ## Abstract
 
-We train a small transformer language model whose parameters are small integers
-and whose vocabulary includes tokens for those integers and for addresses of its
-own weight rows. Prompted with an address, the model emits the integers stored at
-that address. Printing every address and loading the result into an empty copy of
-the architecture gives back the same model. The self-printing objective is trained
-jointly with next-character prediction, and its target is the model's own current
-weights, so training chases a fixed point in which the weights both model text and
-describe themselves. We report how close to that fixed point training gets for
-ternary and 7-level weights, what it costs in language-model loss, how the copy
-degrades or stabilises over generations, and what happens when the model prints
-itself with sampling noise, which turns self-printing into reproduction with
-mutation and lets a population of copies improve without gradients. To our
-knowledge this is the first transformer, and the first language model, that
-reproduces its own parameters; the only prior neural-network quine (Chang & Lipson,
-2018) was a feed-forward regressor that approximated its weights.
+We build a small transformer language model whose parameters are small integers
+and whose vocabulary is its own weight rows. Prompted with the address of a weight,
+the model emits the integer stored there. Printing every address and loading the
+result into an empty copy of the architecture gives back the same model, bit for
+bit, and the copy prints itself again. Memorising one's own weights is impossible
+by a counting argument, so the model uses a hand-built copy circuit that reads the
+addressed row out of the embedding table. The language model trains on top of the
+circuit without breaking it. In the first version all weights shared one scale,
+and the language model was poor (2.88 nats/char). We show that the weight scale the
+circuit needs, not the circuit itself, was the cause, and give the circuit and the
+rest of the network separate printed scales. The result is a 156,160-weight
+character model at 2.08 nats/char on tiny-shakespeare (a plain model of the same
+size: 1.86) that reproduces itself exactly for three generations. To our knowledge
+this is the first transformer, and the first language model, that reproduces its
+own parameters; the only prior neural-network quine (Chang & Lipson, 2018) was a
+feed-forward regressor that approximated its weights.
 
 ## 1. Setup
 
@@ -78,6 +79,17 @@ the circuit prints **152,000 of 152,000 weights** and the scale token; the print
 loaded into an empty model is bit-identical to the printer, and so is its printout,
 for as many generations as we ran.
 
+**Two scales (v2).** The circuit is exact only when the weights are large: at
+d = 128 with four layers, `construct` finds it exact at scales 0.98, 1.5 and 2.0 and
+wrong on 57,560 of 1,115,008 weights at 0.74, because attention must be sharp and
+attention scores grow with the square of the scale. Ternary language models prefer
+small scales. v2 therefore splits the rows into two groups, the circuit's rows and
+all others, each with its own scale snapped to the 64-level grid. Both scales are
+printed, by `<Q> <SCALE_0>` and `<Q> <SCALE_1>`, and both answers are read from
+reserved coordinates (Z and A) that no trainable row may write, so they are exact by
+construction. The circuit uses 3d + 7 of the 4d hidden units of layer 0; the other
+d − 7 are free.
+
 ## 2. Why self-printing is a capacity problem
 
 A network with N quantised parameters, each taking one of 2k+1 values, has a
@@ -126,13 +138,34 @@ generations we ran. This is the first language model that reproduces its own
 parameters exactly.
 
 The language model is weak (2.89 nats/char; a plain 2-layer model of this size
-reaches about 2.2 to 2.5), because the circuit occupies the first layer and seven
-of the 64 coordinates, and because training at the weight scale the circuit needs
-(1.5) is noisy. Random initialisation of the second layer, kept silent on the
+reaches 1.86, Section 3.2). Section 3.2 shows that the weight scale the circuit
+needs, not the circuit, is responsible. Random initialisation of the second layer, kept silent on the
 self-print prompt, was necessary for the language model to train at all: from an
 all-zero second layer, almost no code flips in 2,000 steps.
 
-### 3.2 What training discovers on its own
+### 3.2 The weight scale, not the circuit, limited v1
+
+Same architecture and data; losses on the same 64 validation batches
+(`python -m ouroboros.table`); every exact model verified for three generations.
+
+| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
+|---|---|---|---|---|---|---|
+| v1: circuit, one scale 1.5 (tm19) | 152,000 | 2 × 64 | 1.5 | 152,000 / 152,000 | yes (3 generations) | 2.88 |
+| circuit, one scale 1.0 (v2_d64_s1) | 152,000 | 2 × 64 | 0.978 | 152,000 / 152,000 | yes (3 generations) | 2.81 |
+| learned from scratch, scale 1.0 (v2_d64_plain_s1) | 152,000 | 2 × 64 | 0.978 | 106,073 / 152,000 | no | 2.76 |
+| **v2: circuit, two scales (v2_d64_2s_long)** | 156,160 | 2 × 64 | 0.978 / 0.152 | 156,160 / 156,160 | yes (3 generations) | 2.08 |
+| plain LM, no circuit, scale 0.15 (v2_d64_plain) | 152,000 | 2 × 64 | 0.152 | – (no self-print training) | – | 1.86 |
+
+At one shared scale of 1.0 the circuit model (2.81) is within 0.05 nats of a model
+trained from scratch at that scale (2.76), and the latter cannot print itself (70 %
+of weights, child loss 12.9). Lowering the scale to 0.15 takes the plain model to
+1.86. With two scales (circuit 0.98, the rest 0.15; 8,000 steps, learning rate 3e-3,
+three minutes on a laptop CPU) the self-printing model reaches 2.08 and stays exact
+at every evaluation and for three generations. The remaining 0.22 nats is plausibly
+the capacity the circuit takes: all of layer 0's attention and 7 of 64 coordinates.
+All of this is one seed.
+
+### 3.3 What training discovers on its own
 
 Trained from random initialisation with the self-printing loss, the same
 architecture finds a partial copy circuit within about 2,000 steps: 78 % of
@@ -146,14 +179,14 @@ weights remove the zero class and still plateau near 80 % because attention at
 the small weight scales training prefers is not sharp (scores scale with the
 square of the weight scale).
 
-### 3.3 Memorising oneself does not work, and cannot
+### 3.4 Memorising oneself does not work, and cannot
 
 The first version of this project (separate matrices, two-digit row addresses, no
 quote mechanism) never left the marginal rate across ternary and 7-level weights,
 sparsity, soft targets and regeneration, and memorising a frozen snapshot of the
 weights was just as slow. The counting argument in Section 2 says why.
 
-### 3.4 Reproduction with mutation
+### 3.5 Reproduction with mutation
 
 Printing with sampling noise turns the printer into a reproduction operator with
 a mutation rate set by the temperature. At τ = 1.5 about 16 % of the weights
@@ -166,8 +199,10 @@ Reported as a demo, not a result.
 ## 4. Limitations
 
 Rows are printed one address at a time, not as one unbroken sequence. The
-architecture and tokenizer (the "interpreter") are not printed. Results are on a
-125k-parameter character model; nothing here says what happens at scale.
+architecture and tokenizer (the "interpreter") are not printed. The trained results
+are on 152k- and 156k-weight character models, one seed each; the circuit itself is
+checked exactly at 1.1M weights (d = 128, 4 layers, context 256) but no language
+model of that size is reported here.
 
 ## 5. Related work
 

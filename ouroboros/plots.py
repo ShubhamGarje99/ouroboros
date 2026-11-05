@@ -23,7 +23,7 @@ def plot_training(log_paths: dict[str, str], out: str):
     ax[2].set_title("weights that are exactly zero (%)")
     for a in ax:
         a.set_xlabel("step"); a.grid(alpha=.3)
-    ax[0].legend()
+    ax[0].legend(fontsize=8, loc="center right")
     fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
 
 

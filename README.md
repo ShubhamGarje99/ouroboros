@@ -1,6 +1,6 @@
 # Ouroboros: a language model that prints its own weights
 
-**Status (2026-11-05): done for v1. A 152,000-weight character model trained on Shakespeare (val loss 2.89 nats/char) prints all of its own weights exactly; the printout, loaded into an empty model, is bit-identical, and so is its own printout. Every number in this README is printed by a script in the repo.**
+**Status (2026-11-05): v2. A 156,160-weight character model trained on Shakespeare (val loss 2.08 nats/char; v1: 2.88) prints all of its own weights and both of its weight scales exactly. The printout, loaded into an empty model, is bit-identical, and so is its own printout, for three generations. A plain model of the same size with no self-printing reaches 1.86, so exactness now costs 0.22 nats/char instead of 1.0. Every number in this README is printed by a script in the repo.**
 
 Ouroboros is a small character-level GPT with one unusual ability: ask it for
 any row of any of its own weight matrices and it answers with the exact
@@ -39,6 +39,23 @@ scale is a snapped statistic of the table and is printed too (`<Q> <SCALE>`).
 printout, checks bit-identity, measures the child's language-model loss, and
 repeats for several generations.
 
+### Two scales (v2)
+
+The copy circuit needs large weights. Attention has to be sharp, and the hand-built
+circuit is exact only at a weight scale of about 1.0 or more: `ouroboros.construct`
+checks every prompt and finds the d=128, 4-layer circuit exact at 0.98, 1.5 and 2.0 and
+wrong on 57,560 of 1,115,008 weights at 0.74. A ternary language model trains badly at
+that scale. In v1 every weight shared one scale, so the language model was stuck at it.
+
+v2 gives the table two scales: one for the circuit's rows (control, value, coordinate
+and scale tokens, the first three positions, layer 0's attention and the circuit's
+hidden units) and one for every other row. The model prints both, with
+`<Q> <SCALE_0>` and `<Q> <SCALE_1>`. Each answer is read from a reserved coordinate
+that no trainable row can write, so both are exact by construction rather than
+learned. Everything else about printing is unchanged: a row is its codes times its
+scale. The circuit also no longer fills layer 0: its 3d + 7 hidden units leave the
+remaining d − 7 free for the language model.
+
 ### What did not work (and why it cannot)
 
 The first version (`ouroboros/model.py`, `train.py`, `verify.py`, kept for
@@ -56,6 +73,17 @@ itself) with a broken language model (loss 5.2 versus 2.8).
 
 ## Reproduce
 
+v2, the result in the status line (about 3 minutes on a laptop CPU, ~44 steps/s):
+
+```bash
+.venv/bin/python -m ouroboros.train_tm --init_circuit --protect 0.0 --n_scale 2 --scale 1.0 --free_scale 0.15 \
+    --lr 3e-3 --steps 8000 --eval_every 1000 --eval_n 16 --out runs.noindex/v2_d64_2s_long
+.venv/bin/python -m ouroboros.verify_tm runs.noindex/v2_d64_2s_long/ckpt.pt --generations 3 --eval_n 64
+.venv/bin/python -m ouroboros.construct --d 128 --n_layer 4 --n_head 8 --block 256 --scales 0.5,0.71,1.0,1.41,2.0
+```
+
+v1:
+
 ```bash
 uv venv .venv --python 3.12
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu numpy matplotlib
@@ -64,13 +92,39 @@ curl -sL -o data.noindex/shakespeare.txt https://raw.githubusercontent.com/karpa
 .venv/bin/python -m ouroboros.verify_tm runs.noindex/tm1/ckpt.pt --generations 3
 ```
 
-Everything runs on a laptop CPU in minutes (115k parameters, ~11 steps/s on an M3).
+Everything runs on a laptop CPU in minutes (152k weights, ~11 steps/s on an M3 with the v1 code).
 
 ## Results
 
 All numbers below are produced by the scripts in this repo on a laptop CPU
-(M3, 8 GB), with checkpoints under `runs.noindex/`. The model is 2,375 rows × 64
-= 152,000 ternary weights, 2 layers, 4 heads, context 128.
+(M3, 8 GB), with checkpoints under `runs.noindex/`. All models are 2 layers, d = 64,
+4 heads, context 128, character-level tiny-shakespeare (1.1 MB, 90/10 split).
+
+**v2: a good language model that prints itself exactly.** Printed by
+`python -m ouroboros.table`; the loss is on the same 64 validation batches for every row.
+
+| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
+|---|---|---|---|---|---|---|
+| v1: circuit, one scale 1.5 (tm19) | 152,000 | 2 × 64 | 1.5 | 152,000 / 152,000 | yes (3 generations) | 2.88 |
+| circuit, one scale 1.0 (v2_d64_s1) | 152,000 | 2 × 64 | 0.978 | 152,000 / 152,000 | yes (3 generations) | 2.81 |
+| learned from scratch, scale 1.0 (v2_d64_plain_s1) | 152,000 | 2 × 64 | 0.978 | 106,073 / 152,000 | no | 2.76 |
+| **v2: circuit, two scales (v2_d64_2s_long)** | 156,160 | 2 × 64 | 0.978 / 0.152 | 156,160 / 156,160 | yes (3 generations) | 2.08 |
+| plain LM, no circuit, scale 0.15 (v2_d64_plain) | 152,000 | 2 × 64 | 0.152 | – (no self-print training) | – | 1.86 |
+
+Reading the rows from top to bottom:
+
+- **The circuit is not what made v1 weak.** At one scale of 1.0, the circuit model
+  (2.81) is within 0.05 of a model learned from scratch at the same scale (2.76),
+  and the from-scratch model cannot print itself: it gets 70 % of its weights right
+  and its child has a loss of 12.9.
+- **The weight scale was.** The same plain model at scale 0.15 reaches 1.86.
+- **Two scales recover most of the gap.** v2 reaches 2.08 and stays exact. The
+  remaining 0.22 is plausibly structural: the circuit takes all of layer 0's
+  attention and seven of 64 coordinates, so the language model has about one and a
+  half working layers out of two. This is a single seed.
+
+**v1 results** (kept as recorded; v1 losses are on 8 validation batches). The model
+is 2,375 rows × 64 = 152,000 ternary weights.
 
 **1. An exact self-printer exists (constructive).** `ouroboros.circuit.install_copy_circuit`
 writes the copy circuit into layer 0 of a fresh table (layer 1 zero). With no
@@ -113,16 +167,19 @@ copies, and random mutations hit it in proportion to its size. A viable
 mutation operator would have to spare the circuit, which is what the training
 mask does. Reported as a demo, not a result (`runs.noindex/*/evolve_tau*.json`).
 
-Figures: `figures/training.png` (self-print accuracy, LM loss and zero fraction;
-the tm18 curve shows the language model learning while self-print stays at 100 %)
-and `figures/generations.png`.
+Figures: `figures/training.png` compares v1 (tm18), v2 and the plain model
+(LM loss, teacher-forced self-print accuracy, zero fraction; the plain model has no
+self-print training, so its accuracy is the chance level). `figures/generations.png`
+shows v2's three generations: every weight exact, child loss unchanged.
 
 ## One line for a resume
 
 Built Ouroboros, the first transformer that prints its own weights exactly: a
-152k-parameter character LM whose vocabulary is its own weight rows; proved
-memorisation cannot work, hand-built and verified a bit-exact self-copy circuit,
-and trained the LM on top of it without losing exactness (CPU only).
+156k-parameter character LM whose vocabulary is its own weight rows; proved
+memorisation cannot work, hand-built a bit-exact self-copy circuit, and found that
+the weight scale, not the circuit, limited the LM. With a separate printed scale
+for the circuit the LM reaches 2.08 nats/char (plain model 1.86) and copies of it
+stay bit-identical for 3 generations (CPU only).
 
 ## Related work
 
