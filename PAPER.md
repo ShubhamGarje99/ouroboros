@@ -14,9 +14,10 @@ addressed row out of the embedding table. The language model trains on top of th
 circuit without breaking it. In the first version all weights shared one scale,
 and the language model was poor (2.88 nats/char). We show that the weight scale the
 circuit needs, not the circuit itself, was the cause, and give the circuit and the
-rest of the network separate printed scales. The result is a 156,160-weight
-character model at 2.08 nats/char on tiny-shakespeare (a plain model of the same
-size: 1.86) that reproduces itself exactly for three generations. To our knowledge
+rest of the network separate printed scales. At 156k weights the self-printing
+model then reaches 2.08 nats/char on tiny-shakespeare (plain model: 1.86); at 1.1M
+weights (4 layers, d = 128, context 256) it reaches 1.58 (plain model: 1.53), and
+it reproduces itself exactly for three generations. To our knowledge
 this is the first transformer, and the first language model, that reproduces its
 own parameters; the only prior neural-network quine (Chang & Lipson, 2018) was a
 feed-forward regressor that approximated its weights.
@@ -165,7 +166,24 @@ at every evaluation and for three generations. The remaining 0.22 nats is plausi
 the capacity the circuit takes: all of layer 0's attention and 7 of 64 coordinates.
 All of this is one seed.
 
-### 3.3 What training discovers on its own
+### 3.3 Scaling to 1.1M weights
+
+The same recipe at 4 layers, d = 128, 8 heads and context 256, trained for 10,000
+steps on one T4 GPU (23 minutes) and verified again on a laptop CPU:
+
+| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
+|---|---|---|---|---|---|---|
+| **v2: circuit, two scales (v2_d128, Kaggle T4)** | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.58 |
+| plain LM, no circuit, scale 0.15 (v2_d128_plain) | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.53 |
+
+The cost of exactness falls from 0.22 nats at 156k weights to 0.04 at 1.1M. The
+circuit's footprint is fixed (one layer's attention, 3d + 7 hidden units, 7
+coordinates), so its share of the network shrinks as the network grows. Two other
+settings of the free rows were also exact for three generations and reached 1.69
+(learning rate 1e-3) and 1.86 (free scale 0.23). Printing all 1.1M weights takes
+about 23 seconds on the CPU. One seed per setting.
+
+### 3.4 What training discovers on its own
 
 Trained from random initialisation with the self-printing loss, the same
 architecture finds a partial copy circuit within about 2,000 steps: 78 % of
@@ -179,14 +197,14 @@ weights remove the zero class and still plateau near 80 % because attention at
 the small weight scales training prefers is not sharp (scores scale with the
 square of the weight scale).
 
-### 3.4 Memorising oneself does not work, and cannot
+### 3.5 Memorising oneself does not work, and cannot
 
 The first version of this project (separate matrices, two-digit row addresses, no
 quote mechanism) never left the marginal rate across ternary and 7-level weights,
 sparsity, soft targets and regeneration, and memorising a frozen snapshot of the
 weights was just as slow. The counting argument in Section 2 says why.
 
-### 3.5 Reproduction with mutation
+### 3.6 Reproduction with mutation
 
 Printing with sampling noise turns the printer into a reproduction operator with
 a mutation rate set by the temperature. At τ = 1.5 about 16 % of the weights
@@ -199,10 +217,9 @@ Reported as a demo, not a result.
 ## 4. Limitations
 
 Rows are printed one address at a time, not as one unbroken sequence. The
-architecture and tokenizer (the "interpreter") are not printed. The trained results
-are on 152k- and 156k-weight character models, one seed each; the circuit itself is
-checked exactly at 1.1M weights (d = 128, 4 layers, context 256) but no language
-model of that size is reported here.
+architecture and tokenizer (the "interpreter") are not printed. The largest model
+is 1.1M weights on a 1.1 MB character corpus, one seed per setting; nothing here
+says what happens at the scale of real language models or on word-level data.
 
 ## 5. Related work
 

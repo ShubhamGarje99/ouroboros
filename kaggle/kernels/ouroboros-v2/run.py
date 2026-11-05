@@ -36,17 +36,14 @@ CIRCUIT = ["--init_circuit", "--protect", "0.0", "--n_scale", "2", "--scale", "1
 # language model wants).  Sweep the free scale and the learning rate; one plain baseline for the ceiling.
 RUNS = [
     ("c2_fs015_lr3e-3", CIRCUIT + ["--free_scale", "0.15", "--lr", "3e-3", "--steps", "10000"]),
-    ("c2_fs025_lr3e-3", CIRCUIT + ["--free_scale", "0.25", "--lr", "3e-3", "--steps", "10000"]),
-    ("c2_fs010_lr3e-3", CIRCUIT + ["--free_scale", "0.10", "--lr", "3e-3", "--steps", "10000"]),
+    ("plain_s015_lr3e-3", ["--strict_causal", "--scale", "0.15", "--lam", "0.0", "--lr", "3e-3", "--steps", "10000"]),
     ("c2_fs015_lr1e-3", CIRCUIT + ["--free_scale", "0.15", "--lr", "1e-3", "--steps", "10000"]),
-    ("c2_fs050_lr3e-3", CIRCUIT + ["--free_scale", "0.50", "--lr", "3e-3", "--steps", "10000"]),
-    ("c2_fs015_lr3e-3_fd02", CIRCUIT + ["--free_scale", "0.15", "--lr", "3e-3", "--steps", "10000", "--free_density", "0.2"]),
-    ("plain_s025_lr3e-3", ["--strict_causal", "--scale", "0.25", "--lr", "3e-3", "--steps", "10000"]),
+    ("c2_fs025_lr3e-3", CIRCUIT + ["--free_scale", "0.25", "--lr", "3e-3", "--steps", "10000"]),
 ]
 for name, extra in RUNS:
     t0 = time.time()
     print(f"\n===== {name} =====", flush=True)
     subprocess.run([sys.executable, "-m", "ouroboros.train_tm", "--out", f"runs/{name}", *ARCH, *extra], check=True)
-    subprocess.run([sys.executable, "-m", "ouroboros.verify_tm", f"runs/{name}/ckpt.pt", "--generations", "1",
+    subprocess.run([sys.executable, "-m", "ouroboros.verify_tm", f"runs/{name}/ckpt.pt", "--generations", "3",
                     "--device", "cuda", "--eval_n", "16", "--threads", "2"], check=False)
     print(f"===== {name} done in {time.time() - t0:.0f}s", flush=True)

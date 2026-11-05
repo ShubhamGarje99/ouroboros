@@ -1,6 +1,6 @@
 # Ouroboros: a language model that prints its own weights
 
-**Status (2026-11-05): v2. A 156,160-weight character model trained on Shakespeare (val loss 2.08 nats/char; v1: 2.88) prints all of its own weights and both of its weight scales exactly. The printout, loaded into an empty model, is bit-identical, and so is its own printout, for three generations. A plain model of the same size with no self-printing reaches 1.86, so exactness now costs 0.22 nats/char instead of 1.0. Every number in this README is printed by a script in the repo.**
+**Status (2026-11-05): v2. A 1.12M-weight character model (4 layers, d = 128, context 256) trained on Shakespeare reaches 1.58 nats/char and prints all 1,123,328 of its own weights and both of its weight scales exactly. The printout, loaded into an empty model, is bit-identical, and so is its own printout, for three generations. A plain model of the same size with no self-printing reaches 1.53, so exactness costs 0.04 nats/char. v1 (152k weights) reached 2.88. Every number in this README is printed by a script in the repo.**
 
 Ouroboros is a small character-level GPT with one unusual ability: ask it for
 any row of any of its own weight matrices and it answers with the exact
@@ -82,6 +82,16 @@ v2, the result in the status line (about 3 minutes on a laptop CPU, ~44 steps/s)
 .venv/bin/python -m ouroboros.construct --d 128 --n_layer 4 --n_head 8 --block 256 --scales 0.5,0.71,1.0,1.41,2.0
 ```
 
+v2 at 1.1M weights: run `kaggle/stage.sh` and push `kaggle/kernels/ouroboros-v2` (a T4,
+about 23 minutes per run), or locally with `--device cuda` on any GPU:
+
+```bash
+.venv/bin/python -m ouroboros.train_tm --init_circuit --protect 0.0 --n_scale 2 --scale 1.0 --free_scale 0.15 \
+    --d 128 --n_layer 4 --n_head 8 --block 256 --seq 256 --batch 64 --qbatch 1024 --lr 3e-3 --steps 10000 \
+    --warmup 300 --out runs.noindex/v2_d128_c2_fs015_lr3e-3
+.venv/bin/python -m ouroboros.verify_tm runs.noindex/v2_d128_c2_fs015_lr3e-3/ckpt.pt --generations 3 --eval_n 64
+```
+
 v1:
 
 ```bash
@@ -122,6 +132,22 @@ Reading the rows from top to bottom:
   remaining 0.22 is plausibly structural: the circuit takes all of layer 0's
   attention and seven of 64 coordinates, so the language model has about one and a
   half working layers out of two. This is a single seed.
+
+**v2 at 1.1M weights.** 4 layers, d = 128, 8 heads, context 256, 10,000 steps at
+learning rate 3e-3 on a Kaggle T4 (23 minutes per run, `kaggle/kernels/ouroboros-v2`).
+The checkpoint was downloaded and verified again on the laptop CPU for three
+generations; the loss is on 64 validation batches of 256 characters.
+
+| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
+|---|---|---|---|---|---|---|
+| **v2: circuit, two scales (v2_d128, Kaggle T4)** | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.58 |
+| plain LM, no circuit, scale 0.15 (v2_d128_plain) | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.53 |
+
+At this size exactness costs 0.04 nats/char, against 0.22 at d = 64. That fits the
+reading above: the circuit takes one layer's attention and 7 coordinates whatever
+the model size, so its share shrinks as the model grows. Two other free-row
+settings, also exact for three generations, did worse (learning rate 1e-3: 1.69;
+free scale 0.23: 1.86); see `figures/training_d128.png`. One seed per setting.
 
 **v1 results** (kept as recorded; v1 losses are on 8 validation batches). The model
 is 2,375 rows × 64 = 152,000 ternary weights.
@@ -167,7 +193,8 @@ copies, and random mutations hit it in proportion to its size. A viable
 mutation operator would have to spare the circuit, which is what the training
 mask does. Reported as a demo, not a result (`runs.noindex/*/evolve_tau*.json`).
 
-Figures: `figures/training.png` compares v1 (tm18), v2 and the plain model
+Figures: `figures/training_d128.png` shows the four 1.1M-weight runs (three exact
+self-printers and the plain model). `figures/training.png` compares v1 (tm18), v2 and the plain model
 (LM loss, teacher-forced self-print accuracy, zero fraction; the plain model has no
 self-print training, so its accuracy is the chance level). `figures/generations.png`
 shows v2's three generations: every weight exact, child loss unchanged.
@@ -175,11 +202,11 @@ shows v2's three generations: every weight exact, child loss unchanged.
 ## One line for a resume
 
 Built Ouroboros, the first transformer that prints its own weights exactly: a
-156k-parameter character LM whose vocabulary is its own weight rows; proved
+1.1M-parameter character LM whose vocabulary is its own weight rows. Proved
 memorisation cannot work, hand-built a bit-exact self-copy circuit, and found that
-the weight scale, not the circuit, limited the LM. With a separate printed scale
-for the circuit the LM reaches 2.08 nats/char (plain model 1.86) and copies of it
-stay bit-identical for 3 generations (CPU only).
+the weight scale, not the circuit, limited the LM. The final model reaches 1.58
+nats/char on Shakespeare (plain model 1.53), and its copies stay bit-identical for
+3 generations.
 
 ## Related work
 

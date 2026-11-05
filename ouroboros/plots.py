@@ -46,9 +46,10 @@ if __name__ == "__main__":
     p.add_argument("--logs", nargs="*", default=[], help="label=path/to/log.json")
     p.add_argument("--verify", default=None)
     p.add_argument("--outdir", default="figures")
+    p.add_argument("--suffix", default="", help="appended to the figure file names, e.g. _d128")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     if a.logs:
-        plot_training(dict(s.split("=", 1) for s in a.logs), os.path.join(a.outdir, "training.png"))
+        plot_training(dict(s.split("=", 1) for s in a.logs), os.path.join(a.outdir, f"training{a.suffix}.png"))
     if a.verify:
-        plot_generations(a.verify, os.path.join(a.outdir, "generations.png"))
+        plot_generations(a.verify, os.path.join(a.outdir, f"generations{a.suffix}.png"))
