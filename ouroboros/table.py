@@ -29,7 +29,7 @@ def main():
     for spec in a.runs:
         label, run = spec.split("=", 1)
         model, ck = load(os.path.join(run, "ckpt.pt"))
-        loss = eval_lm(model, torch.tensor(model.encode_text(val_text)), ck["args"]["seq"], 32, a.eval_n)
+        loss = eval_lm(model, model.encode_corpus(val_text), ck["args"]["seq"], 32, a.eval_n)
         scales = " / ".join(f"{float(s):.3g}" for s in model.scale_values())
         vp = os.path.join(run, "verify.json")
         if os.path.exists(vp):

@@ -94,7 +94,7 @@ def main():
     torch.set_num_threads(args.threads)
     model, ck = load(args.ckpt, args.device)
     _, val_text, _ = load_text(args.data)
-    val_ids = torch.tensor(model.encode_text(val_text))
+    val_ids = model.encode_corpus(val_text)
     seq = ck["args"]["seq"]
     results = {"params": model.n_params(), "rows": model.R, "d": model.cfg.d, "n_layer": model.cfg.n_layer,
                "scales": [float(v) for v in model.scale_values()], "generations": []}

@@ -6,6 +6,6 @@ set -e
 cd "$(dirname "$0")/.."
 D="$1"; mkdir -p "$D/ouroboros"
 cp ouroboros/*.py "$D/ouroboros/"
-cp data.noindex/shakespeare.txt "$D/"
+cp data.noindex/shakespeare.txt data.noindex/tinystories.txt "$D/"
 cp kaggle/dataset-metadata.json "$D/"
 ls -la "$D" "$D/ouroboros"

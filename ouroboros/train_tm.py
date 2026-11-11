@@ -15,8 +15,8 @@ from .tm import TableGPT, TConfig
 
 def text_batch(ids, seq, batch, gen, device=None):
     ix = torch.randint(0, len(ids) - seq - 1, (batch,), generator=gen)
-    x = torch.stack([ids[i:i + seq] for i in ix])
-    y = torch.stack([ids[i + 1:i + 1 + seq] for i in ix])
+    x = torch.stack([ids[i:i + seq] for i in ix]).long()
+    y = torch.stack([ids[i + 1:i + 1 + seq] for i in ix]).long()
     return x.to(device), y.to(device)
 
 
@@ -133,7 +133,7 @@ def main():
     model = TableGPT(cfg)
     if args.init_circuit:
         from .circuit import install_copy_circuit
-        install_copy_circuit(model, scale=args.scale or 1.0, free_density=args.free_density,
+        install_copy_circuit(model, seed=args.seed, scale=args.scale or 1.0, free_density=args.free_density,
                              free_scale=(args.free_scale or 0.15) if args.n_scale == 2 else None)
         if args.n_scale == 2 and args.free_scale == 0:
             model.frozen[1] = False  # the free rows' scale follows the BitNet rule
@@ -152,8 +152,9 @@ def main():
     if args.resume:
         model.frozen = list(ck.get("frozen", [model.frozen_scale] * model.cfg.n_scale))
     model.to(args.device)
-    train_ids = torch.tensor(model.encode_text(train_text))
-    val_ids = torch.tensor(model.encode_text(val_text))
+    train_ids = model.encode_corpus(train_text)
+    val_ids = model.encode_corpus(val_text)
+    del train_text, val_text
     print(f"rows/tokens={model.R} params={model.n_params():,} device={args.device}", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0, betas=(0.9, 0.95))

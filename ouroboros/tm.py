@@ -233,5 +233,22 @@ class TableGPT(nn.Module):
     def encode_text(self, s: str) -> list[int]:
         return [self.cfg.chars.index(c) for c in s]
 
+    def encode_corpus(self, s: str) -> torch.Tensor:
+        """Encode a long text as a uint8 tensor of character ids (one byte per character).
+        Needs every character to be in the vocabulary and the vocabulary to have < 256 entries;
+        callers convert batches to int64 before use."""
+        assert self.C < 256
+        lut = torch.full((256,), 255, dtype=torch.uint8)
+        for i, c in enumerate(self.cfg.chars):
+            if ord(c) < 256:
+                lut[ord(c)] = i
+        try:
+            b = torch.frombuffer(bytearray(s.encode("latin-1")), dtype=torch.uint8)
+        except UnicodeEncodeError:
+            return torch.tensor(self.encode_text(s), dtype=torch.uint8)
+        ids = lut[b.long()] if len(b) < 2**24 else torch.cat([lut[b[i:i + 2**24].long()] for i in range(0, len(b), 2**24)])
+        assert int(ids.max()) < self.C, "text contains characters outside the vocabulary"
+        return ids
+
     def decode_text(self, ids) -> str:
         return "".join(self.cfg.chars[i] if i < self.C else f"<{i}>" for i in ids)

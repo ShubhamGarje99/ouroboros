@@ -24,7 +24,8 @@ else:  # the CLI may upload a folder as an archive
     shutil.copytree(src, f"{W}/ouroboros", dirs_exist_ok=True)
 print("code:", sorted(os.listdir(f"{W}/ouroboros")))
 os.makedirs(f"{W}/data.noindex", exist_ok=True)
-shutil.copy([os.path.join(r, f) for r, _, fs in os.walk(SRC) for f in fs if f == "shakespeare.txt"][0], f"{W}/data.noindex/shakespeare.txt")
+for name in ("shakespeare.txt", "tinystories.txt"):
+    shutil.copy([os.path.join(r, f) for r, _, fs in os.walk(SRC) for f in fs if f == name][0], f"{W}/data.noindex/{name}")
 os.chdir(W)
 import torch  # noqa: E402
 print("torch", torch.__version__, "cuda", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
@@ -34,16 +35,21 @@ ARCH = ["--d", "128", "--n_layer", "4", "--n_head", "8", "--block", "256", "--se
 CIRCUIT = ["--init_circuit", "--protect", "0.0", "--n_scale", "2", "--scale", "1.0"]
 # Two scale groups: the circuit rows stay at 1.0, the free rows train at a small scale (what the
 # language model wants).  Sweep the free scale and the learning rate; one plain baseline for the ceiling.
+TS = ["--data", "data.noindex/tinystories.txt"]
+# v5: two more seeds of the headline setting and of the plain baseline, then TinyStories (51.6 MB ASCII).
 RUNS = [
-    ("c2_fs015_lr3e-3", CIRCUIT + ["--free_scale", "0.15", "--lr", "3e-3", "--steps", "10000"]),
-    ("plain_s015_lr3e-3", ["--strict_causal", "--scale", "0.15", "--lam", "0.0", "--lr", "3e-3", "--steps", "10000"]),
-    ("c2_fs015_lr1e-3", CIRCUIT + ["--free_scale", "0.15", "--lr", "1e-3", "--steps", "10000"]),
-    ("c2_fs025_lr3e-3", CIRCUIT + ["--free_scale", "0.25", "--lr", "3e-3", "--steps", "10000"]),
+    ("c2_fs015_lr3e-3_seed1", CIRCUIT + ["--free_scale", "0.15", "--lr", "3e-3", "--steps", "10000", "--seed", "1"]),
+    ("plain_s015_lr3e-3_seed1", ["--strict_causal", "--scale", "0.15", "--lam", "0.0", "--lr", "3e-3", "--steps", "10000", "--seed", "1"]),
+    ("ts_c2_fs015_lr3e-3", TS + CIRCUIT + ["--free_scale", "0.15", "--lr", "3e-3", "--steps", "10000"]),
+    ("ts_plain_s015_lr3e-3", TS + ["--strict_causal", "--scale", "0.15", "--lam", "0.0", "--lr", "3e-3", "--steps", "10000"]),
+    ("c2_fs015_lr3e-3_seed2", CIRCUIT + ["--free_scale", "0.15", "--lr", "3e-3", "--steps", "10000", "--seed", "2"]),
+    ("plain_s015_lr3e-3_seed2", ["--strict_causal", "--scale", "0.15", "--lam", "0.0", "--lr", "3e-3", "--steps", "10000", "--seed", "2"]),
 ]
 for name, extra in RUNS:
     t0 = time.time()
     print(f"\n===== {name} =====", flush=True)
     subprocess.run([sys.executable, "-m", "ouroboros.train_tm", "--out", f"runs/{name}", *ARCH, *extra], check=True)
-    subprocess.run([sys.executable, "-m", "ouroboros.verify_tm", f"runs/{name}/ckpt.pt", "--generations", "3",
+    data = extra[extra.index("--data") + 1] if "--data" in extra else "data.noindex/shakespeare.txt"
+    subprocess.run([sys.executable, "-m", "ouroboros.verify_tm", f"runs/{name}/ckpt.pt", "--generations", "3", "--data", data,
                     "--device", "cuda", "--eval_n", "16", "--threads", "2"], check=False)
     print(f"===== {name} done in {time.time() - t0:.0f}s", flush=True)
