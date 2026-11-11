@@ -1,6 +1,6 @@
 # Ouroboros: a language model that prints its own weights
 
-**Status (2026-11-05): v2. A 1.12M-weight character model (4 layers, d = 128, context 256) trained on Shakespeare reaches 1.58 nats/char and prints all 1,123,328 of its own weights and both of its weight scales exactly. The printout, loaded into an empty model, is bit-identical, and so is its own printout, for three generations. A plain model of the same size with no self-printing reaches 1.53, so exactness costs 0.04 nats/char. v1 (152k weights) reached 2.88. Every number in this README is printed by a script in the repo.**
+**Status (2026-11-11): v2. A 1.12M-weight character model (4 layers, d = 128, context 256) trained on Shakespeare reaches 1.573 nats/char (mean of 3 seeds) and prints all 1,123,328 of its own weights and both of its weight scales exactly. The printout, loaded into an empty model, is bit-identical, and so is its own printout, for three generations, in every seed. A plain model of the same size with no self-printing reaches 1.525, so exactness costs 0.048 nats/char. On TinyStories the same model reaches 0.97 (plain: 0.89) and is exact too. v1 (152k weights) reached 2.88. Every number in this README is printed by a script in the repo.**
 
 Ouroboros is a small character-level GPT with one unusual ability: ask it for
 any row of any of its own weight matrices and it answers with the exact
@@ -135,19 +135,41 @@ Reading the rows from top to bottom:
 
 **v2 at 1.1M weights.** 4 layers, d = 128, 8 heads, context 256, 10,000 steps at
 learning rate 3e-3 on a Kaggle T4 (23 minutes per run, `kaggle/kernels/ouroboros-v2`).
-The checkpoint was downloaded and verified again on the laptop CPU for three
-generations; the loss is on 64 validation batches of 256 characters.
+Every circuit checkpoint was downloaded and verified again on the laptop CPU for
+three generations; the loss is on 64 validation batches of 256 characters
+(`python -m ouroboros.table --decimals 3`).
 
 | model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
 |---|---|---|---|---|---|---|
-| **v2: circuit, two scales (v2_d128, Kaggle T4)** | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.58 |
-| plain LM, no circuit, scale 0.15 (v2_d128_plain) | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.53 |
+| circuit, seed 0 | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.577 |
+| circuit, seed 1 | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.556 |
+| circuit, seed 2 | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.586 |
+| plain LM, seed 0 | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.530 |
+| plain LM, seed 1 | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.520 |
+| plain LM, seed 2 | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.524 |
 
-At this size exactness costs 0.04 nats/char, against 0.22 at d = 64. That fits the
+Averaged over three seeds the circuit model reaches 1.573 (1.556 to 1.586) and the
+plain model 1.525 (1.520 to 1.530): exactness costs 0.048 nats/char, against 0.22
+at d = 64. That fits the
 reading above: the circuit takes one layer's attention and 7 coordinates whatever
 the model size, so its share shrinks as the model grows. Two other free-row
 settings, also exact for three generations, did worse (learning rate 1e-3: 1.69;
-free scale 0.23: 1.86); see `figures/training_d128.png`. One seed per setting.
+free scale 0.23: 1.86, one seed each); see `figures/training_d128.png`.
+
+**TinyStories.** TinyStories (Eldan & Li, 2023) is a corpus of short, simple stories. We take the
+first 50 MB of the V2 training file, keep printable ASCII (80 distinct characters,
+`ouroboros/prep_tinystories.py`), and split it 90/10 into 46.4M training and 5.2M
+validation characters. Same model and recipe, one seed:
+
+| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
+|---|---|---|---|---|---|---|
+| TinyStories, circuit | 1,125,248 | 4 × 128 | 0.978 / 0.152 | 1,125,248 / 1,125,248 | yes (3 generations) | 0.97 |
+| TinyStories, plain LM | 1,116,928 | 4 × 128 | 0.152 | – (no self-print training) | – | 0.89 |
+
+The self-printing model is exact here too. The gap is wider than on Shakespeare
+(0.08), but the circuit model's loss is still falling at 10,000 steps while the
+plain model's has nearly levelled off (`figures/training_tinystories.png`), so part
+of the gap is likely the short run.
 
 **v1 results** (kept as recorded; v1 losses are on 8 validation batches). The model
 is 2,375 rows × 64 = 152,000 ternary weights.
@@ -193,7 +215,8 @@ copies, and random mutations hit it in proportion to its size. A viable
 mutation operator would have to spare the circuit, which is what the training
 mask does. Reported as a demo, not a result (`runs.noindex/*/evolve_tau*.json`).
 
-Figures: `figures/training_d128.png` shows the four 1.1M-weight runs (three exact
+Figures: `figures/training_tinystories.png` shows the TinyStories pair.
+`figures/training_d128.png` shows the four seed-0 1.1M-weight runs (three exact
 self-printers and the plain model). `figures/training.png` compares v1 (tm18), v2 and the plain model
 (LM loss, teacher-forced self-print accuracy, zero fraction; the plain model has no
 self-print training, so its accuracy is the chance level). `figures/generations.png`
@@ -204,13 +227,14 @@ shows v2's three generations: every weight exact, child loss unchanged.
 Built Ouroboros, the first transformer that prints its own weights exactly: a
 1.1M-parameter character LM whose vocabulary is its own weight rows. Proved
 memorisation cannot work, hand-built a bit-exact self-copy circuit, and found that
-the weight scale, not the circuit, limited the LM. The final model reaches 1.58
-nats/char on Shakespeare (plain model 1.53), and its copies stay bit-identical for
-3 generations.
+the weight scale, not the circuit, limited the LM. The final model reaches 1.573
+nats/char on Shakespeare (plain model 1.525, means of 3 seeds), and its copies stay
+bit-identical for 3 generations.
 
 ## Related work
 
 - Chang & Lipson, *Neural Network Quine*, 2018 (arXiv:1803.05859): MLP that regresses its own weights; ~90% MNIST as an auxiliary task.
 - Schmidgall, *Self-Replicating Neural Programs*, 2021 (arXiv:2109.12786): replication of a training program in a toy language.
+- Eldan & Li, *TinyStories*, 2023 (arXiv:2305.07759): the second corpus.
 - BitNet b1.58 (Ma et al., 2024): ternary-weight language models, the reason k = 1 is a sane choice.
 - Allen-Zhu & Li, *Physics of Language Models 3.3* (2024): ~2 bits of knowledge per parameter, the capacity bound that makes self-printing non-trivial.

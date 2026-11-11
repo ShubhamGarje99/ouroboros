@@ -16,8 +16,9 @@ and the language model was poor (2.88 nats/char). We show that the weight scale 
 circuit needs, not the circuit itself, was the cause, and give the circuit and the
 rest of the network separate printed scales. At 156k weights the self-printing
 model then reaches 2.08 nats/char on tiny-shakespeare (plain model: 1.86); at 1.1M
-weights (4 layers, d = 128, context 256) it reaches 1.58 (plain model: 1.53), and
-it reproduces itself exactly for three generations. To our knowledge
+weights (4 layers, d = 128, context 256) it reaches 1.573 (plain model: 1.525; means of
+three seeds) and 0.97 on TinyStories (plain: 0.89). Every self-printing model
+here reproduces itself exactly for three generations. To our knowledge
 this is the first transformer, and the first language model, that reproduces its
 own parameters; the only prior neural-network quine (Chang & Lipson, 2018) was a
 feed-forward regressor that approximated its weights.
@@ -169,21 +170,44 @@ All of this is one seed.
 ### 3.3 Scaling to 1.1M weights
 
 The same recipe at 4 layers, d = 128, 8 heads and context 256, trained for 10,000
-steps on one T4 GPU (23 minutes) and verified again on a laptop CPU:
+steps on one T4 GPU (23 minutes) per seed and verified again on a laptop CPU:
 
 | model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
 |---|---|---|---|---|---|---|
-| **v2: circuit, two scales (v2_d128, Kaggle T4)** | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.58 |
-| plain LM, no circuit, scale 0.15 (v2_d128_plain) | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.53 |
+| circuit, seed 0 | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.577 |
+| circuit, seed 1 | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.556 |
+| circuit, seed 2 | 1,123,328 | 4 × 128 | 0.978 / 0.152 | 1,123,328 / 1,123,328 | yes (3 generations) | 1.586 |
+| plain LM, seed 0 | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.530 |
+| plain LM, seed 1 | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.520 |
+| plain LM, seed 2 | 1,115,008 | 4 × 128 | 0.152 | – (no self-print training) | – | 1.524 |
 
-The cost of exactness falls from 0.22 nats at 156k weights to 0.04 at 1.1M. The
+Over three seeds the circuit model reaches 1.573 (1.556 to 1.586) and the plain
+model 1.525 (1.520 to 1.530). The cost of exactness falls from 0.22 nats at 156k
+weights to 0.048 at 1.1M. The
 circuit's footprint is fixed (one layer's attention, 3d + 7 hidden units, 7
 coordinates), so its share of the network shrinks as the network grows. Two other
 settings of the free rows were also exact for three generations and reached 1.69
 (learning rate 1e-3) and 1.86 (free scale 0.23). Printing all 1.1M weights takes
-about 23 seconds on the CPU. One seed per setting.
+about 23 seconds on the CPU. The two alternative settings are one seed each.
 
-### 3.4 What training discovers on its own
+### 3.4 A second corpus: TinyStories
+
+TinyStories (Eldan & Li, 2023) is a corpus of short, simple stories. We take the
+first 50 MB of the V2 training file, keep printable ASCII (80 distinct characters,
+`ouroboros/prep_tinystories.py`), and split it 90/10 into 46.4M training and 5.2M
+validation characters. Same model and recipe, one seed:
+
+| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |
+|---|---|---|---|---|---|---|
+| TinyStories, circuit | 1,125,248 | 4 × 128 | 0.978 / 0.152 | 1,125,248 / 1,125,248 | yes (3 generations) | 0.97 |
+| TinyStories, plain LM | 1,116,928 | 4 × 128 | 0.152 | – (no self-print training) | – | 0.89 |
+
+The circuit model is exact for three generations. The gap (0.08 nats) is larger
+than on Shakespeare, but the circuit model is still improving at 10,000 steps while
+the plain model has nearly levelled off, so the gap at convergence is not measured
+here.
+
+### 3.5 What training discovers on its own
 
 Trained from random initialisation with the self-printing loss, the same
 architecture finds a partial copy circuit within about 2,000 steps: 78 % of
@@ -197,14 +221,14 @@ weights remove the zero class and still plateau near 80 % because attention at
 the small weight scales training prefers is not sharp (scores scale with the
 square of the weight scale).
 
-### 3.5 Memorising oneself does not work, and cannot
+### 3.6 Memorising oneself does not work, and cannot
 
 The first version of this project (separate matrices, two-digit row addresses, no
 quote mechanism) never left the marginal rate across ternary and 7-level weights,
 sparsity, soft targets and regeneration, and memorising a frozen snapshot of the
 weights was just as slow. The counting argument in Section 2 says why.
 
-### 3.6 Reproduction with mutation
+### 3.7 Reproduction with mutation
 
 Printing with sampling noise turns the printer into a reproduction operator with
 a mutation rate set by the temperature. At τ = 1.5 about 16 % of the weights
@@ -218,11 +242,12 @@ Reported as a demo, not a result.
 
 Rows are printed one address at a time, not as one unbroken sequence. The
 architecture and tokenizer (the "interpreter") are not printed. The largest model
-is 1.1M weights on a 1.1 MB character corpus, one seed per setting; nothing here
-says what happens at the scale of real language models or on word-level data.
+is 1.1M weights, trained on two small character corpora (three seeds for the main
+Shakespeare comparison, one otherwise); nothing here says what happens at the
+scale of real language models or on word-level data.
 
 ## 5. Related work
 
-Chang & Lipson 2018; Schmidgall 2021; BitNet b1.58 (Ma et al. 2024); Allen-Zhu & Li
+Chang & Lipson 2018; Schmidgall 2021; Eldan & Li 2023 (TinyStories); BitNet b1.58 (Ma et al. 2024); Allen-Zhu & Li
 2024 (capacity); Hofstadter's self-reference; von Neumann's self-reproducing
 automata (the copier/description split that this model collapses into one object).

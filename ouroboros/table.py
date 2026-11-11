@@ -21,11 +21,13 @@ def main():
     p.add_argument("--data", default="data.noindex/shakespeare.txt")
     p.add_argument("--eval_n", type=int, default=64)
     p.add_argument("--threads", type=int, default=3)
+    p.add_argument("--decimals", type=int, default=2)
     a = p.parse_args()
     torch.set_num_threads(a.threads)
     _, val_text, _ = load_text(a.data)
     print("| model | weights | layers × d | scales | self-print exact | child bit-identical | LM val loss |")
     print("|---|---|---|---|---|---|---|")
+    groups: dict[str, list[float]] = {}
     for spec in a.runs:
         label, run = spec.split("=", 1)
         model, ck = load(os.path.join(run, "ckpt.pt"))
@@ -41,7 +43,15 @@ def main():
             exact, ident = "– (no self-print training)" if ck["args"].get("lam", 1.0) == 0 else "not verified", "–"
         else:
             exact, ident = "not verified", "–"
-        print(f"| {label} | {model.n_params():,} | {model.cfg.n_layer} × {model.cfg.d} | {scales} | {exact} | {ident} | {loss:.2f} |")
+        print(f"| {label} | {model.n_params():,} | {model.cfg.n_layer} × {model.cfg.d} | {scales} | {exact} | {ident} | {loss:.{a.decimals}f} |")
+        groups.setdefault(label.split(", seed")[0], []).append(loss)
+    for name, v in groups.items():
+        if len(v) > 1:
+            print(f"\n{name}: mean {sum(v) / len(v):.3f}, min {min(v):.3f}, max {max(v):.3f} over {len(v)} seeds")
+    means = {k: sum(v) / len(v) for k, v in groups.items() if len(v) > 1}
+    if len(means) == 2:
+        (k1, m1), (k2, m2) = means.items()
+        print(f"difference of means ({k1} minus {k2}): {m1 - m2:.3f}")
 
 
 if __name__ == "__main__":
